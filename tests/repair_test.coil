@@ -90,3 +90,11 @@
   (assert (!= (p/cast i64 (root 1)) 0))
   (assert (= (value 1) 42)) (s/leave!)
   (assert (= (s/close!) 0)))
+
+(deftest blocked-prototypes-do-not-enter-retained-forms
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (import \"live-poc-coil.prototype-policy\") (defn f [] (-> i64) 1)") 0))
+  (for [i 0 20]
+    (assert (= (s/submit-deferred! "(module demo) (defn f [] (-> i64) true)") 2))
+    (assert (= (s/submit! "(module demo) (defn f [] (-> i64) 42)") 0)))
+  (assert (= (s/close!) 0)))

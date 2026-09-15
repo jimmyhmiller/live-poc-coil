@@ -1,0 +1,16 @@
+(module live-poc-coil.prototype-policy)
+(import "coil.primitive" :as p)
+;;; Runs after the live semantic pass, including on subsequent transactions.
+;;; The test namespace authors no externs: any such declaration is a leaked
+;;; temporary blocked header, including headers retained by a previous edit.
+(defn audit [(modules Code)] (-> Code)
+  (for [mi 0 (p/code-count modules)]
+    (let [module (p/code-nth modules mi)]
+      (when (p/code-eq (p/code-nth module 0) `demo)
+        (for [fi 1 (p/code-count module)]
+          (let [form (p/code-nth module fi)]
+            (when (and (p/code-list? form) (> (p/code-count form) 0))
+              (when (p/code-eq (p/code-nth form 0) `extern)
+                (p/error "temporary blocked prototype escaped semantic lowering") 0)))))))
+  `(do ~@modules))
+(transform audit)

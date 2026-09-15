@@ -129,6 +129,7 @@
                 (number! (mut response) "completed-input" (.completed queue))
                 (number! (mut response) "cancelled-input" (.cancelled queue))
                 (number! (mut response) "rejected-input" (.rejected queue))
+                (number! (mut response) "coalesced-input" (.coalesced queue))
                 (when (> (al/al-len (.items queue)) 0)
                   (let [work (al/al-get (.items queue) 0)]
                     (number! (mut response) "first-input-ticket" (.ticket work))))

@@ -53,3 +53,28 @@
     (pending/destroy! queue)
     (assert (rt/close! runtime))
     (rt/collect-views! runtime) (rt/destroy! runtime)))
+
+(deftest coalescing-does-not-cross-intervening-input
+  (let [runtime (p/alloc-stack rt/Runtime) queue (p/alloc-stack pending/Queue)
+        counts (p/alloc-stack Counts)]
+    (store! counts (p/zeroed Counts))
+    (rt/init! runtime) (pending/init! queue 3)
+    (let [view (rt/clone-current! runtime)]
+      (rt/stage! view 0 (p/cast (ptr i8) (p/fnptr-of target)))
+      (rt/publish! runtime view))
+    (assert (= (pending/enqueue-coalescing! queue 6 0 (payload counts 1) (p/fnptr-of run) (p/fnptr-of drop)) 1))
+    (assert (= (pending/enqueue-coalescing! queue 6 0 (payload counts 2) (p/fnptr-of run) (p/fnptr-of drop)) 1))
+    (assert (= (.dropped counts) 1))
+    (assert (= (pending/enqueue! queue 0 (payload counts 3) (p/fnptr-of run) (p/fnptr-of drop)) 2))
+    (assert (= (pending/enqueue-coalescing! queue 6 0 (payload counts 4) (p/fnptr-of run) (p/fnptr-of drop)) 3))
+    (assert (= (pending/enqueue-coalescing! queue 6 0 (payload counts 5) (p/fnptr-of run) (p/fnptr-of drop)) 3))
+    (assert (= (.dropped counts) 2))
+    (assert (= (.coalesced queue) 2))
+    (assert (= (pending/pump-one! queue runtime) 1))
+    (assert (= (pending/pump-one! queue runtime) 2))
+    (assert (= (pending/pump-one! queue runtime) 3))
+    (assert (= (.order counts) 235))
+    (assert (= (.dropped counts) 5))
+    (assert (= (pending/cancel! queue 0) -1))
+    (pending/close! queue) (pending/destroy! queue)
+    (assert (rt/close! runtime)) (rt/collect-views! runtime) (rt/destroy! runtime)))

@@ -58,7 +58,7 @@ python3 scripts/benchmark.py --count 1000 --warmup 20 \
 
 The latest 1,000-edit color run passed with median 45.2 ms, p99 53.3 ms and maximum 71.8 ms; zero misses including clock uncertainty. Every frame reported the app active and window visible. The measured Paper render was 1280 × 960 at scale 2 with a 16.67 ms frame duration. [Raw measurements and limits](docs/measurements/README.md) include Python and actual unsaved Emacs runs.
 
-Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 26 passing tests, both protocol scripts pass, and three Emacs integration tests pass.
+Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 30 passing tests, both protocol scripts pass, and three Emacs integration tests pass.
 
 ## Remaining scope
 
