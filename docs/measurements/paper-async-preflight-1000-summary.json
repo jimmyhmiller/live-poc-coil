@@ -1,0 +1,39 @@
+{
+  "workload": "alternating-button-pigment",
+  "configuration": {
+    "count": 1000,
+    "warmup": 20,
+    "limit_ms": 100,
+    "delay_max_ms": 17,
+    "timeout": 5,
+    "output": "build/paper-async-preflight-1000.json"
+  },
+  "clock": {
+    "roundtrip": 5.8374833315610886e-05,
+    "offset": -1.8118880689144135e-06,
+    "uncertainty": 2.9187416657805443e-05
+  },
+  "environment": {
+    "os": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "hardware": "Mac14,6",
+    "cpu": "Apple M2 Max",
+    "project_commit": "4acbe4fa925f0d8a4c0bdea5a1092234144d4d57",
+    "project_status": "",
+    "compiler_sha256": "27743368c2b1237265f5ca38bdf4cb0a1b05ee9af51a0b80d15c635d7970286d",
+    "fixture_sha256": "1d2b7200a3fe548dd5b55d8f282c83776fd4b661ac852f295aa645cff9dcd0ee"
+  },
+  "summary": {
+    "measured": 1000,
+    "presented": 1000,
+    "p50_ms": 44.90670911036432,
+    "p95_ms": 51.99827067553997,
+    "p99_ms": 52.77502071112394,
+    "max_ms": 53.1383128836751,
+    "misses_including_clock_uncertainty": 0,
+    "other_outcomes": 0,
+    "timing_gate_passed": true,
+    "background_or_unknown_samples": 0,
+    "foreground_timing_gate_passed": true,
+    "pixel_gate": "separate verification required"
+  }
+}

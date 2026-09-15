@@ -9,8 +9,9 @@ These are raw successful runs from September 15, 2026. Each run contains 1,000 m
 | Source ledger and expressions / Emacs unsaved buffer | 48.3 ms | 66.2 ms | 79.0 ms | 0 |
 | Semantic repair and Paper admission / Python | 45.2 ms | 53.3 ms | 71.8 ms | 0 |
 | Semantic repair and Paper admission / Emacs | 38.4 ms | 50.4 ms | 63.1 ms | 0 |
+| Separate compiler worker and publication preflight / Python | 44.9 ms | 52.8 ms | 53.1 ms | 0 |
 
-The threshold includes each run's clock uncertainty. Emacs uncertainty was 0.080 ms; its submit timestamp precedes buffer-text extraction and nREPL encoding. Emacs uses its wall-clock timestamp calibrated against the host's presentation clock. A final clock-drift audit is still needed; the Python driver uses a monotonic clock. Neither endpoint measures physical photons.
+The threshold includes each run's clock uncertainty. Emacs uncertainty was 0.080 ms; its submit timestamp precedes buffer-text extraction and nREPL encoding. Emacs uses its wall-clock timestamp calibrated against the host's presentation clock. The initial Emacs run lacks an endpoint drift audit; the later repair run includes the audit described below. The Python driver uses a monotonic clock. Neither endpoint measures physical photons.
 
 The Mac reports Apple M2 Max and a built-in display mode at 120 Hz (see `display.json`). The later repair runs record every measured frame at 1280 × 960 pixels, scale 2, with Paper frame duration 16.67 ms (60 Hz). Every measured frame reports the app active and window visible. The earlier runs lack those per-frame checks. Workload-specific pixel comparison remains outstanding. The window was visually inspected before and after runs; native drawable callbacks establish presentation of the revision's frame.
 
@@ -29,3 +30,7 @@ These reports establish only the color workload. Blocked repair, schema migratio
 The Emacs recorder initially omitted its new telemetry field because adding an alist key changed only a local list head. Frame metadata was recovered from the same host's retained revision samples, checking exact equality with each original presentation timestamp. The enriched report records that provenance, and the original remains in `build/emacs-paper-repair-1000.json`. The recorder now preallocates the field.
 
 `paper-repair-visual.json` records the blocked scene and queued-click verification. Precise static/indirect dependency analysis, schema migration, tick coalescing, watcher, streaming and broader stress gates remain separate work.
+
+## Separate worker and preflight run
+
+`paper-async-preflight-1000.json.gz` records the native host at commit `4acbe4f`, after compiler/network separation, input tick coalescing, and publication preflight. Twenty declared warm-ups precede 1,000 measured edits. All measured revisions presented while the app was active and the window visible. Median 44.907 ms, p95 51.998 ms, p99 52.775 ms, maximum 53.138 ms; zero misses including clock uncertainty. This validates the color path with the new control lane. It does not exercise schema migration or replace the outstanding pixel comparison.
