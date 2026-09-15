@@ -1,5 +1,7 @@
 (module live-poc-coil.semantic)
 (import "coil.primitive" :as p)
+(import "live-poc-coil.policy-state" :as policy)
+(import "live-poc-coil.syntax-state" :as syntax)
 (import "coil.slice" :as slice)
 
 ;;; Typed descriptor erased by the semantic transform before native execution.
@@ -9,10 +11,11 @@
 (extern lpc_stage_dependency :cc c [i64 i64] (-> i64))
 (extern lpc_stage_opaque :cc c [i64] (-> i64))
 (extern lpc_stage_blocked :cc c [i64 i64] (-> i64))
-(extern lpc_stage_source :cc c [(ptr u8) i64 (ptr u8) i64 i64] (-> i64))
-(defn stage-source [(module (slice u8)) (name (slice u8)) (condition i64)] (-> i64)
+(extern lpc_stage_source :cc c [(ptr u8) i64 (ptr u8) i64 i64 (ptr u8) i64] (-> i64))
+(defn stage-source [(module (slice u8)) (name (slice u8)) (condition i64) (text (slice u8))] (-> i64)
   (lpc_stage_source (slice/slice-data module) (slice/slice-len module)
-    (slice/slice-data name) (slice/slice-len name) condition))
+    (slice/slice-data name) (slice/slice-len name) condition
+    (slice/slice-data text) (slice/slice-len text)))
 
 (defn declaration? [(decl Code)] (-> bool)
   (and (p/code-list? decl) (and (>= (p/code-count decl) 4)
@@ -108,11 +111,12 @@
       (for [i 0 (p/code-count form)]
         (when (dependencies! (p/code-nth form i) registry out) (set! opaque true))) 0)
     (load opaque)))
-(defn rewrite [(form Code) (modules Code) (registry Code)] (-> Code)
+(defn rewrite [(form Code) (modules Code) (registry Code) (candidate Code)] (-> Code)
   (if (descriptor? form)
     (let [binding (p/code-decl (p/code-nth form 3))
           outcome `(stage-source ~(p/code-str (p/code-nth binding 1))
-                      ~(p/code-nth form 2) ~(p/code-nth form 6))]
+                      ~(p/code-nth form 2) ~(p/code-nth form 6)
+                      ~(policy/source-text candidate (p/code-nth binding 1) (p/code-nth form 3)))]
     (if (p/code-eq (p/code-nth form 6) `0)
       (let [dependencies (p/code-list-new) calls (p/code-list-new)
             id (p/code-nth form 1) implementation (implementation modules form) (mut opaque) false]
@@ -138,7 +142,7 @@
     (if (p/code-list? form)
       (let [out (p/code-list-new)]
         (for [i 0 (p/code-count form)]
-          (p/code-list-push! out (rewrite (p/code-nth form i) modules registry)))
+          (p/code-list-push! out (rewrite (p/code-nth form i) modules registry candidate)))
         (if (p/code-vector? form) `[~@(p/code-list-done out)] (p/code-list-done out)))
       form)))
 (defn blocked-prototype? [(form Code) (descriptors Code)] (-> bool)
@@ -153,16 +157,17 @@
           (break :found true))))
     false))
 (defn transform [(modules Code)] (-> Code)
-  (let [descriptors (p/code-list-new) (mut active) false]
+  (let [descriptors (p/code-list-new) (mut active) false (mut candidate) (policy/current)]
     (for [mi 0 (p/code-count modules)]
       (let [module (p/code-nth modules mi)]
         (for [fi 1 (p/code-count module)]
           (let [form (p/code-nth module fi)]
+            (when (policy/envelope? form) (set! candidate (syntax/payload form)) 0)
             (when (publication? form)
               (set! active true) (descriptors! form descriptors) 0)))))
     (if (not (load active)) `(do ~@modules)
       (let [items (p/code-list-done descriptors)
-            (mut registry) (p/code-session-state `()) out (p/code-list-new)]
+            (mut registry) (policy/functions (policy/current)) out (p/code-list-new)]
         (for [i 0 (p/code-count items)]
           (set! registry (replace-registry (load registry) (p/code-nth items i))))
         (for [mi 0 (p/code-count modules)]
@@ -170,10 +175,10 @@
             (p/code-list-push! next (p/code-nth module 0))
             (for [fi 1 (p/code-count module)]
               (let [form (p/code-nth module fi)]
-                (unless (blocked-prototype? form items)
+                (unless (or (policy/envelope? form) (blocked-prototype? form items))
                   (p/code-list-push! next
-                    (if (publication? form) (rewrite form modules (load registry)) form)) 0)))
+                    (if (publication? form) (rewrite form modules (load registry) (load candidate)) form)) 0)))
             (p/code-list-push! out (p/code-list-done next))))
-        (p/code-session-stage! (load registry))
+        (p/code-session-stage! (policy/with-functions (load candidate) (load registry)))
         `(do ~@(p/code-list-done out))))))
 

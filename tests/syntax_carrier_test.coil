@@ -1,0 +1,13 @@
+(module live-poc-coil.syntax-carrier-test)
+(import "live-poc-coil.session" :as session)
+(deftest schema-syntax-survives-expansion-and-checking-without-retained-carriers
+  (assert (= (session/init!) 0))
+  (assert (= (session/submit! "(module carrier-demo) (import \"live-poc-coil.meta\") (import \"live-poc-coil.syntax-carrier-policy\" :as policy) (meta (policy/generate)) (defn value [] (-> i64) 8)") 0))
+  (assert (= (session/submit! "(module carrier-demo) (value)") 0))
+  (assert (= (.result (session/instance)) "8"))
+  ; If the compiler retained the compile-time carrier, this would expand.
+  (assert (!= (session/submit! "(module carrier-demo) (candidate-envelope)") 0))
+  (assert (= (session/submit! "(module carrier-demo) (meta (policy/generate)) (defn value [] (-> i64) 9)") 0))
+  (assert (= (session/submit! "(module carrier-demo) (value)") 0))
+  (assert (= (.result (session/instance)) "9"))
+  (assert (= (session/close!) 0)))

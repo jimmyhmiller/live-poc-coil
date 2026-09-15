@@ -11,8 +11,8 @@
     (source/begin! ledger "(module demo) (defn f [] (-> i64) 1) (defn g [] (-> i64) 2)")
     (source/finish! ledger 0 1 "")
     (source/begin! ledger "(module demo) (defn f [] (-> i64) true) (defn g [] (-> i64) 3)")
-    (store! (p/index outcomes 0) (plan/Outcome :index 0 :condition 9))
-    (store! (p/index outcomes 1) (plan/Outcome :index 1 :condition 0))
+    (store! (p/index outcomes 0) (plan/Outcome :index 0 :condition 9 :text "(defn f [] (-> i64) true)"))
+    (store! (p/index outcomes 1) (plan/Outcome :index 1 :condition 0 :text "(defn g [] (-> i64) 3)"))
     (let [items (slice/slice-new (p/cast (ptr plan/Outcome) outcomes) 2)]
       (assert (= (plan/prepare! candidate ledger items 2 "bad f") 0))
       (let [f (al/al-get (.forms ledger) 0) g (al/al-get (.forms ledger) 1)]
@@ -29,10 +29,37 @@
         (assert (= (.diagnostic f) "bad f"))
         (assert (= (.condition f) 9)) (assert (= (.revision f) 1)) (assert (= (.revision g) 2)))
       (source/begin! ledger "(module demo) (defn f [] (-> i64) 4)")
-      (store! (p/index outcomes 0) (plan/Outcome :index 0 :condition 0))
+      (store! (p/index outcomes 0) (plan/Outcome :index 0 :condition 0 :text "(defn f [] (-> i64) 4)"))
       (assert (= (plan/prepare! candidate ledger items 3 "") 0))
       (plan/publish! candidate ledger) (plan/clear! candidate)
       (let [f (al/al-get (.forms ledger) 0)]
         (assert (= (.accepted f) "(defn f [] (-> i64) 4)"))
         (assert (= (.diagnostic f) "")) (assert (= (.condition f) 0)) (assert (= (.revision f) 3))))
+    (plan/destroy! candidate) (source/destroy! ledger)))
+
+(deftest dependency-recheck-records-the-compiled-source-without-accepting-a-rejected-edit
+  (let [ledger (p/alloc-stack source/Ledger) candidate (p/alloc-stack plan/Plan)
+        outcome (p/alloc-stack plan/Outcome)]
+    (source/init! ledger) (plan/init! candidate)
+    (source/begin! ledger "(module demo) (defn f [] (-> i64) 1)")
+    (source/finish! ledger 0 1 "")
+    (source/begin! ledger "(module demo) (defn f [] (-> i64) (.flag state))")
+    (source/finish! ledger 1 1 "rejected desired body")
+    ; Another declaration triggers a dependency recheck of accepted f.
+    (source/begin! ledger "(module demo) (defstruct State [(x i64)])")
+    (store! outcome (plan/Outcome :index 0 :condition 0 :text "(defn f [] (-> i64) 1)"))
+    (assert (= (plan/prepare! candidate ledger (slice/slice-new outcome 1) 2 "") 0))
+    (plan/publish! candidate ledger) (plan/clear! candidate)
+    (let [f (al/al-get (.forms ledger) 0)]
+      (assert (= (.accepted f) "(defn f [] (-> i64) 1)"))
+      (assert (= (.desired f) "(defn f [] (-> i64) (.flag state))"))
+      (assert (= (.diagnostic f) "rejected desired body"))
+      (assert (= (.revision f) 2)))
+    ; If a later schema makes desired source valid, accept that exact source.
+    (store! outcome (plan/Outcome :index 0 :condition 0 :text "(defn f [] (-> i64) (.flag state))"))
+    (assert (= (plan/prepare! candidate ledger (slice/slice-new outcome 1) 3 "") 0))
+    (plan/publish! candidate ledger) (plan/clear! candidate)
+    (let [f (al/al-get (.forms ledger) 0)]
+      (assert (= (.accepted f) (.desired f)))
+      (assert (= (.diagnostic f) "")) (assert (= (.revision f) 3)))
     (plan/destroy! candidate) (source/destroy! ledger)))

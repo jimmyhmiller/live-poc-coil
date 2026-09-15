@@ -1,0 +1,185 @@
+(module live-poc-coil.managed)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.atomic" :as atomic)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.graph" :as graph)
+(import "live-poc-coil.relocation" :as relocation)
+(import "live-poc-coil.runtime" :as rt)
+(import "live-poc-coil.fallible-list" :as list)
+;;; The compiler lane owns candidate registries. UI access goes through a pinned
+;;; runtime invocation and cannot enter while a layout transaction is active.
+(defstruct Owner [(schema (ptr graph/Schema)) (image (ptr rt/Image))])
+(defstruct State [(runtime (ptr rt/Runtime)) (heap graph/Heap) (point graph/Savepoint)
+  (targets (al/ArrayList (ptr graph/Schema))) (owners (al/ArrayList Owner))
+  (pending-owners (al/ArrayList (ptr graph/Schema)))
+  (constructible (al/ArrayList (ptr graph/Schema))) (cancel (ptr i64)) (active bool) (deferred bool)
+  (failure i64) (prior-closed bool) (prior-condition i64)
+  (phase i64) (condition i64) (epoch i64) (initialized bool)])
+(defn state [] (-> (ptr State)) (p/alloc-static State))
+(defn init! [(runtime (ptr rt/Runtime))] (-> i64)
+  (let [s (state)]
+    (assert (not (.initialized s)))
+    (store! s (p/zeroed State))
+    (set! (.runtime s) runtime)
+    (graph/init! (field s heap) (a/malloc-allocator))
+    (set! (.targets s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
+    (set! (.owners s) (al/al-new [Owner] (a/malloc-allocator)))
+    (set! (.pending-owners s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
+    (set! (.constructible s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
+    (set! (.initialized s) true)) 0)
+(defn begin! [(cancel (ptr i64)) (deferred bool)] (-> i64)
+  (let [s (state)]
+    (assert (.initialized s)) (assert (= (.phase (field s heap)) 0))
+    (set! (.point s) (graph/savepoint (field s heap)))
+    (set! (.len (field s targets)) 0)
+    (set! (.cancel s) cancel) (set! (.deferred s) deferred)
+    (set! (.active s) false) (set! (.failure s) 0) (set! (.len (field s pending-owners)) 0)
+    (set! (.prior-condition s) (atomic/atomic-load (field s condition)))
+    (rt/lock! (.runtime s))
+    (set! (.prior-closed s) (.layout-closed (.runtime s)))
+    (rt/unlock! (.runtime s))) 0)
+(defn stage-result! [(result i64)] (-> i64)
+  (when (and (!= result 0) (= (.failure (state)) 0)) (set! (.failure (state)) result))
+  result)
+(defn open! [] (-> i64)
+  (let [s (state)]
+    (when (and (= (.failure s) 0) (not (.active s)))
+      (set! (.active s) true)
+      (atomic/atomic-store (field s phase) 1)
+      (rt/close-layout! (.runtime s))
+      (stage-result! (rt/drain-layout! (.runtime s) (.cancel s)))
+      (when (= (.failure s) 0) (atomic/atomic-store (field s phase) 2)))
+    (.failure s)))
+(defn schema [(logical i64) (version i64)] (-> (ptr graph/Schema))
+  (block :done
+    (for [i 0 (al/al-len (.schemas (field (state) heap)))]
+      (let [item (al/al-get (.schemas (field (state) heap)) i)]
+        (when (and (= (.logical item) logical) (= (.version item) version)) (break :done item))))
+    (p/cast (ptr graph/Schema) 0)))
+(defn stage-schema! [(definition (ptr graph/Schema))] (-> i64)
+  (block :done
+    (when (!= (open!) 0) (break :done (.failure (state))))
+    (let [s (state) next (graph/register! (field s heap) (load definition))]
+      (when (= (p/cast i64 next) 0) (break :done (stage-result! -1)))
+      (when (!= (stage-result! (list/push! (field s pending-owners) next)) 0)
+        (break :done (.failure s)))
+      (for [i 0 (al/al-len (.targets s))]
+        (let [old (al/al-get (.targets s) i)]
+          (when (= (.logical old) (.logical next))
+            (when (> (.version next) (.version old)) (al/al-set! (field s targets) i next))
+            (break :done 0))))
+      (stage-result! (list/push! (field s targets) next)))))
+(defn stage-edge! [(logical i64) (from i64) (to i64)
+  (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))] (-> i64)
+  (block :done
+    (when (!= (open!) 0) (break :done (.failure (state))))
+    (let [s (state) status (graph/edge! (field s heap)
+               (graph/Edge :from (schema logical from) :to (schema logical to) :prepare prepare))]
+      (when (= status 0)
+        (stage-result! (list/push! (field s pending-owners) (p/cast (ptr graph/Schema) 0))))
+      (stage-result! status) (.failure s))))
+(defn stage-root! [(id i64) (logical i64) (version i64)] (-> i64)
+  (block :done
+    (when (!= (open!) 0) (break :done (.failure (state))))
+    (stage-result! (if (= (p/cast i64 (graph/root! (field (state) heap) id (schema logical version))) 0) -1 0))))
+(defn stage-root-with! [(id i64) (logical i64) (version i64)
+  (initialize (fnptr c [(ptr i8) (ptr i64)] i64))] (-> i64)
+  (block :done
+    (when (!= (open!) 0) (break :done (.failure (state))))
+    (stage-result! (if (= (p/cast i64 (graph/root-with! (field (state) heap)
+      id (schema logical version) initialize)) 0) -1 0))))
+(defn abort! [] (-> i64)
+  (let [s (state)]
+    (when (.active s) (graph/rollback! (field s heap) (.point s)))
+    (set! (.len (field s pending-owners)) 0)) 0)
+(defn reject! [(status i64)] (-> i64)
+  (set! (.failure (state)) status) (abort!) status)
+;;; Called from the candidate's native entry. Failure destroys private ownership
+;;; here, while all candidate abort callbacks are still mapped and callable.
+(defn prepare! [] (-> i64)
+  (let [s (state)]
+    (when (and (.active s) (= (.failure s) 0))
+      (stage-result! (list/reserve! (field s owners) (+ (al/al-len (.owners s)) (al/al-len (.pending-owners s)))))
+      (when (= (.failure s) 0)
+        (stage-result! (list/reserve! (field s constructible)
+          (+ (al/al-len (.constructible s)) (al/al-len (.targets s))))))
+      (when (= (.failure s) 0)
+        (stage-result! (graph/prepare! (field s heap)
+          (slice/slice-new (.data (field s targets)) (al/al-len (.targets s))) (.cancel s)))))
+    (when (!= (.failure s) 0) (abort!))
+    (.failure s)))
+(defn publish! [(image (ptr rt/Image))] (-> i64)
+  (let [s (state)]
+    (when (.active s)
+      (assert (= (.failure s) 0))
+      (graph/publish! (field s heap))
+      (atomic/atomic-store (field s epoch) (.epoch (field s heap)))
+      (atomic/atomic-store (field s phase) 4)
+      (assert (<= (+ (al/al-len (.owners s)) (al/al-len (.pending-owners s))) (.cap (field s owners))))
+      (for [i 0 (al/al-len (.pending-owners s))]
+        (set! (.references image) (+ (.references image) 1))
+        (al/al-push! (field s owners) (Owner :schema (al/al-get (.pending-owners s) i) :image image)))
+      (for [i 0 (al/al-len (.targets s))]
+        (let [next (al/al-get (.targets s) i) (mut found) false]
+          (for [j 0 (al/al-len (.constructible s))]
+            (let [old (al/al-get (.constructible s) j)]
+              (when (= (.logical old) (.logical next))
+                (al/al-set! (field s constructible) j next) (set! found true) (break))))
+          (unless (load found) (al/al-push! (field s constructible) next))))
+      (set! (.len (field s pending-owners)) 0))) 0)
+(defn collect! [] (-> i64)
+  (let [s (state) (mut kept) 0
+        constructible (slice/slice-new (.data (field s constructible)) (al/al-len (.constructible s)))]
+    (for [i 0 (al/al-len (.owners s))]
+      (let [owner (al/al-get (.owners s) i)]
+        (if (and (!= (p/cast i64 (.schema owner)) 0)
+                 (graph/schema-retained? (field s heap) (.schema owner) constructible))
+          (do (al/al-set! (field s owners) (load kept) owner)
+              (set! kept (+ (load kept) 1)) 0)
+          (let [image (.image owner)]
+            (assert (> (.references image) 0))
+            (set! (.references image) (- (.references image) 1))))))
+    (set! (.len (field s owners)) (load kept))
+    (graph/collect-schemas! (field s heap) constructible)))
+(defn finish! [(success bool)] (-> i64)
+  (let [s (state)]
+    (if (and success (.active s))
+      (do
+        (graph/retire! (field s heap))
+        (collect!)
+        (atomic/atomic-store (field s epoch) (.epoch (field s heap)))
+        (atomic/atomic-store (field s condition) 0)
+        (rt/reopen-layout! (.runtime s))
+        (atomic/atomic-store (field s phase) 0))
+      (when (.active s)
+        (assert (= (.phase (field s heap)) 0))
+        (if (and (.deferred s) (and (!= (.failure s) 0) (!= (.failure s) 3)))
+          (do (atomic/atomic-store (field s condition) (.failure s))
+              (atomic/atomic-store (field s phase) 3))
+          (do
+            (atomic/atomic-store (field s condition) (.prior-condition s))
+            (unless (.prior-closed s) (rt/reopen-layout! (.runtime s)))
+            (atomic/atomic-store (field s phase) (if (.prior-closed s) 3 0))))))
+    (set! (.active s) false) (set! (.cancel s) (p/cast (ptr i64) 0))) 0)
+(defn root-payload [(id i64) (logical i64) (version i64)] (-> (ptr i8))
+  (let [s (state)]
+    (assert (rt/pinned? (.runtime s)))
+    (let [handle (graph/root (field s heap) id)]
+      (assert (!= (p/cast i64 handle) 0))
+      (assert (and (= (.logical (.schema handle)) logical) (= (.version (.schema handle)) version)))
+      (graph/payload (.memory handle)))))
+(export-c [stage-result! :as "lpc_stage_result"] [stage-schema! :as "lpc_stage_schema"]
+  [stage-edge! :as "lpc_stage_edge"] [stage-root! :as "lpc_stage_root"] [stage-root-with! :as "lpc_stage_root_with"] [root-payload :as "lpc_root_payload"])
+(defn destroy! [] (-> i64)
+  (let [s (state)]
+    (assert (= (.phase (field s heap)) 0))
+    (graph/destroy! (field s heap))
+    (for [i 0 (al/al-len (.owners s))]
+      (let [owner (al/al-get (.owners s) i) image (.image owner)]
+        (assert (> (.references image) 0))
+        (set! (.references image) (- (.references image) 1))))
+    (al/al-free! (field s owners)) (al/al-free! (field s targets))
+    (al/al-free! (field s pending-owners)) (al/al-free! (field s constructible))
+    (set! (.initialized s) false)) 0)

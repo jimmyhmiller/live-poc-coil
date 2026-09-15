@@ -6,6 +6,7 @@
 (import "coil.sync" :as sync)
 (import "coil.atomic" :as atomic)
 (import "coil.time" :as time)
+(import "live-poc-coil.fallible-list" :as list)
 (import "coil.result" :use *)
 
 (cimport "pthread.h"
@@ -164,10 +165,11 @@
 ;;; before making a pointer visible to any application invocation.
 (defn reserve-publication! [(r (ptr Runtime))] (-> i64)
   (let [images (field r images) views (field r views)]
-    (when (= (.len images) (.cap images))
-      (al/al-reserve! images (if (= (.cap images) 0) 4 (* (.cap images) 2))))
-    (when (= (.len views) (.cap views))
-      (al/al-reserve! views (if (= (.cap views) 0) 4 (* (.cap views) 2))))) 0)
+    (let [status (if (= (.len images) (.cap images))
+                   (list/reserve! images (if (= (.cap images) 0) 4 (* (.cap images) 2))) 0)]
+      (if (!= status 0) status
+        (if (= (.len views) (.cap views))
+          (list/reserve! views (if (= (.cap views) 0) 4 (* (.cap views) 2))) 0)))))
 (defn own-reserved! [(r (ptr Runtime)) (v (ptr View)) (image (ptr Image)) (token i64)] (-> i64)
   (assert (> token 0))
   (assert (< (al/al-len (.images r)) (.cap (field r images))))
@@ -180,7 +182,7 @@
   (al/al-push! (field r images) image) 0)
 (defn own-staged! [(r (ptr Runtime)) (v (ptr View)) (token i64)] (-> i64)
   (let [image (a/box! (a/malloc-allocator) Image (p/zeroed Image))]
-    (reserve-publication! r)
+    (assert (= (reserve-publication! r) 0))
     (own-reserved! r v image token)))
 
 (defn publish! [(r (ptr Runtime)) (v (ptr View))] (-> i64)

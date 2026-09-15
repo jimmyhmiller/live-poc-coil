@@ -1,0 +1,33 @@
+(module live-poc-coil.syntax-rewrite-policy)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.syntax-rewrite" :as rewrite)
+(defannotation :test/rewrite bool)
+(defn selected? [(form Code)] (-> bool)
+  (block :found
+    (unless (or (rewrite/head? form `defn) (rewrite/head? form `defn*)) (break :found false))
+    (for [i 2 (p/code-count form)]
+      (when (p/code-vector? (p/code-nth form i)) (break :found false))
+      (when (and (p/code-eq (p/code-nth form i) `:test/rewrite)
+        (p/code-eq (p/code-nth form (+ i 1)) `true)) (break :found true)))
+    false))
+(defn rewrite-program [(modules Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [mi 0 (p/code-count modules)]
+      (let [m (p/code-nth modules mi) next (p/code-list-new)]
+        (p/code-list-push! next (p/code-nth m 0))
+        (for [fi 1 (p/code-count m)]
+          (let [form (p/code-nth m fi)]
+            (p/code-list-push! next
+              (if (selected? form)
+                (let [context (p/code-nth form 1)
+                      root (p/datum->syntax context (p/code-symbol "root"))
+                      nominal (p/datum->syntax context (p/code-symbol "State"))
+                      storage (p/datum->syntax context (p/code-symbol "storage"))
+                      physical (p/datum->syntax context (p/code-symbol "Physical"))]
+                  (rewrite/rewrite form
+                    `((~root (~storage))
+                      (~nominal ~physical)) '()))
+                form))))
+        (p/code-list-push! out (p/code-list-like m (p/code-list-done next)))))
+    `(do ~@(p/code-list-done out))))
+(transform rewrite-program :phase after-expand)

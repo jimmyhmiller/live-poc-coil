@@ -4,6 +4,7 @@
 (import "coil.arraylist" :as al)
 (import "coil.sync" :as sync)
 (import "coil.result" :use *)
+(import "live-poc-coil.fallible-list" :as list)
 (extern CACurrentMediaTime :cc c [] (-> f64))
 (defstruct FrameContext [(active bool) (visible bool) (width i64) (height i64)
   (scale f64) (duration f64)])
@@ -23,10 +24,10 @@
   0)
 (defn reserve! [] (-> i64)
   (lock!)
-  (let [samples (field (state) samples)]
-    (when (= (.len samples) (.cap samples))
-      (al/al-reserve! samples (if (= (.cap samples) 0) 4 (* (.cap samples) 2)))))
-  (unlock!))
+  (let [samples (field (state) samples)
+        status (if (= (.len samples) (.cap samples))
+                 (list/reserve! samples (if (= (.cap samples) 0) 4 (* (.cap samples) 2))) 0)]
+    (unlock!) status))
 (defn record! [(revision i64) (received f64) (start f64) (end f64) (published f64)] (-> i64)
   (lock!)
   (assert (= revision (al/al-len (.samples (state)))))

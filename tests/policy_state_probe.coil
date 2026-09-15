@@ -1,0 +1,14 @@
+(module live-poc-coil.policy-state-probe)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.policy-state" :as policy)
+(defn body [(name Code)] (-> Code)
+  (block :found
+    (let [items (policy/authored (policy/current))]
+      (for [i 0 (p/code-count items)]
+        (let [item (p/code-nth items i)]
+          (when (p/bound-identifier=? (p/code-nth item 1) name)
+            (let [form (p/code-nth item 2)]
+              (break :found (p/code-nth form (- (p/code-count form) 1))))))))
+    (p/error "authored definition missing")))
+(defn count [] (-> Code)
+  `~(p/code-count (policy/authored (policy/current))))

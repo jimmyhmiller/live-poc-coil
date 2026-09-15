@@ -1,0 +1,46 @@
+(module live-poc-coil.policy-state)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.syntax-state" :as syntax)
+;;; One transactionally accepted syntax value, shared by the policy's passes.
+;;; Sections hold function identities, current nominal schemas, and named roots.
+(defn current [] (-> Code)
+  (p/code-session-state '(live-policy-v1 () () () ())))
+(defn functions [(state Code)] (-> Code) (p/code-nth state 1))
+(defn schemas [(state Code)] (-> Code) (p/code-nth state 2))
+(defn roots [(state Code)] (-> Code) (p/code-nth state 3))
+(defn with-functions [(state Code) (next Code)] (-> Code)
+  `(live-policy-v1 ~next ~(schemas state) ~(roots state) ~(authored state)))
+(defn with-state [(state Code) (next-schemas Code) (next-roots Code)] (-> Code)
+  `(live-policy-v1 ~(functions state) ~next-schemas ~next-roots ~(authored state)))
+;;; Authored definitions are retained as syntax so a schema edit can recheck
+;;; affected functions against the new physical types without reconstructing
+;;; source text or rewriting already compiled implementations.
+(defn authored [(state Code)] (-> Code) (p/code-nth state 4))
+(defn with-authored [(state Code) (next Code)] (-> Code)
+  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~next))
+(defn remember [(state Code) (module Code) (form Code)] (-> Code)
+  (let [out (p/code-list-new) (mut found) false name (p/code-nth form 1)]
+    (for [i 0 (p/code-count (authored state))]
+      (let [old (p/code-nth (authored state) i)]
+        (if (and (p/code-eq (p/code-nth old 0) module)
+                 (p/bound-identifier=? (p/code-nth old 1) name))
+          (do (p/code-list-push! out `(~module ~name ~form)) (set! found true) 0)
+          (do (p/code-list-push! out old) 0))))
+    (unless (load found) (p/code-list-push! out `(~module ~name ~form)) 0)
+    (with-authored state (p/code-list-done out))))
+
+(defn envelope? [(form Code)] (-> bool)
+  (if (not (syntax/envelope? form)) false
+    (let [data (syntax/payload form)]
+      (and (p/code-list? data) (and (= (p/code-count data) 5)
+        (p/code-eq (p/code-nth data 0) `live-policy-v1))))))
+
+(defn source-text [(state Code) (module Code) (name Code)] (-> (slice u8))
+  (block :found
+    (let [items (authored state)]
+      (for [i 0 (p/code-count items)]
+        (let [item (p/code-nth items i)]
+          (when (and (p/code-eq (p/code-nth item 0) module)
+                     (p/bound-identifier=? (p/code-nth item 1) name))
+            (break :found (p/code-src (p/code-nth item 2)))))))
+    (p/error "compiled live definition has no authored source") ""))

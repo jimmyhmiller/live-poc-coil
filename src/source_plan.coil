@@ -5,7 +5,7 @@
 (import "coil.slice" :as slice)
 (import "live-poc-coil.source" :as source)
 (import "live-poc-coil.fallible-list" :as list)
-(defstruct Outcome [(index i64) (condition i64)])
+(defstruct Outcome [(index i64) (condition i64) (text (slice u8))])
 (defstruct Change [(index i64) (condition i64) (revision i64) (replace-accepted bool)
   (accepted (slice u8)) (diagnostic (slice u8))])
 (defstruct Plan [(changes (al/ArrayList Change)) (diagnostic (slice u8)) (ready bool)])
@@ -31,17 +31,20 @@
     (unless (= (list/reserve! (field plan changes) (al/al-len (.forms ledger))) 0)
       (clear! plan) (break :done -4))
     (for [i 0 (al/al-len (.forms ledger))]
-      (let [form (al/al-get (.forms ledger) i) (mut condition) (.condition form)]
-        (when (= (.attempt form) (.attempt ledger))
-          (for [j 0 (slice/slice-len outcomes)]
-            (let [outcome (slice/slice-get outcomes j)]
-              (when (= (.index outcome) i) (set! condition (.condition outcome)))))
+      (let [form (al/al-get (.forms ledger) i) (mut condition) (.condition form)
+            (mut affected) (= (.attempt form) (.attempt ledger)) (mut text) (.desired form)]
+        (for [j 0 (slice/slice-len outcomes)]
+          (let [outcome (slice/slice-get outcomes j)]
+            (when (= (.index outcome) i)
+              (set! affected true) (set! condition (.condition outcome)) (set! text (.text outcome)))))
+        (when (load affected)
           (let [replace (= (load condition) 0)]
             (al/al-push! (field plan changes)
               (Change :index i :condition (load condition)
                 :revision (if replace revision (.revision form)) :replace-accepted replace
-                :accepted (if replace (source/copy (.desired form)) "")
-                :diagnostic (source/copy (if replace "" diagnostic))))))))
+                :accepted (if replace (source/copy (load text)) "")
+                :diagnostic (source/copy (if replace
+                  (if (= (load text) (.desired form)) "" (.diagnostic form)) diagnostic))))))))
     (set! (.ready plan) true) 0))
 (defn publish! [(plan (ptr Plan)) (ledger (ptr source/Ledger))] (-> i64)
   (assert (.ready plan))

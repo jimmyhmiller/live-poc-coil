@@ -1,0 +1,27 @@
+(module live-poc-coil.syntax-state)
+(import "coil.primitive" :as p)
+(import "coil.jit.lifetime")
+
+;;; A compile-time-only envelope for syntax passed between compiler phases.
+;;; The semantic consumer must remove it before accepting the candidate.
+(defannotation :live/syntax bool)
+(defn envelope [(name Code) (payload Code)] (-> Code)
+  `(defn* ~name :jit/retain false :live/syntax true [] (-> Code) (quote ~payload)))
+(defn envelope? [(form Code)] (-> bool)
+  (block :done
+    (unless (and (p/code-list? form) (>= (p/code-count form) 5)) (break :done false))
+    (unless (or (p/code-eq (p/code-nth form 0) `defn)
+                (p/code-eq (p/code-nth form 0) `defn*)) (break :done false))
+    (for [i 2 (p/code-count form)]
+      (when (p/code-vector? (p/code-nth form i)) (break :done false))
+      (when (and (p/code-eq (p/code-nth form i) `:live/syntax)
+                 (< (+ i 1) (p/code-count form)))
+        (break :done (p/code-eq (p/code-nth form (+ i 1)) `true))))
+    false))
+(defn payload [(form Code)] (-> Code)
+  (unless (envelope? form) (p/error "expected a live syntax envelope") 0)
+  (let [body (p/code-nth form (- (p/code-count form) 1))]
+    (unless (and (p/code-list? body) (and (= (p/code-count body) 2)
+      (p/code-eq (p/code-nth body 0) `quote)))
+      (p/error "live syntax envelope must contain quoted syntax") 0)
+    (p/code-nth body 1)))

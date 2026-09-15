@@ -1,0 +1,25 @@
+(module live-poc-coil.managed-api)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.graph" :as graph)
+(import "live-poc-coil.relocation" :as relocation)
+;;; Internal generated-adapter bridge. Struct arguments are borrowed only for
+;;; this call; the host copies schema metadata before returning.
+(extern lpc_stage_schema :cc c [(ptr graph/Schema)] (-> i64))
+(extern lpc_stage_edge :cc c [i64 i64 i64
+  (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64)] (-> i64))
+(extern lpc_stage_root :cc c [i64 i64 i64] (-> i64))
+(extern lpc_root_payload :cc c [i64 i64 i64] (-> (ptr i8)))
+(defn schema! [(schema graph/Schema)] (-> i64)
+  (let [owned (p/alloc-stack graph/Schema)]
+    (store! owned schema) (lpc_stage_schema owned)))
+(defn edge! [(logical i64) (from i64) (to i64)
+  (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))] (-> i64)
+  (lpc_stage_edge logical from to prepare))
+(defn root! [(id i64) (logical i64) (version i64)] (-> i64) (lpc_stage_root id logical version))
+(defn borrow [T] [(id i64) (logical i64) (version i64)] (-> (ptr T))
+  (p/cast (ptr T) (lpc_root_payload id logical version)))
+
+(extern lpc_stage_root_with :cc c [i64 i64 i64 (fnptr c [(ptr i8) (ptr i64)] i64)] (-> i64))
+(defn root-with! [(id i64) (logical i64) (version i64)
+  (initialize (fnptr c [(ptr i8) (ptr i64)] i64))] (-> i64)
+  (lpc_stage_root_with id logical version initialize))

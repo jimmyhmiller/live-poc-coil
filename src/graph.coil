@@ -78,7 +78,8 @@
     (None [] (slice/slice-new (p/cast (ptr u8) 0) 0))
     (Some [bytes]
       (for [i 0 (.size schema)] (store! (p/index (slice/slice-data bytes) i) (p/cast u8 0))) bytes)))
-(defn new! [(heap (ptr Heap)) (schema (ptr Schema))] (-> (ptr Handle))
+(defn new-with! [(heap (ptr Heap)) (schema (ptr Schema))
+  (initialize (fnptr c [(ptr i8) (ptr i64)] i64))] (-> (ptr Handle))
   (assert (= (.phase heap) 0))
   (block :done
     (unless (known? heap schema) (break :done (p/cast (ptr Handle) 0)))
@@ -87,7 +88,7 @@
     (let [memory (allocate heap schema) initialized (p/alloc-stack i64)]
       (store! initialized 0)
       (when (= (p/cast i64 (payload memory)) 0) (break :done (p/cast (ptr Handle) 0)))
-      (let [status (p/call-ptr (.initialize schema) (payload memory) initialized)]
+      (let [status (p/call-ptr initialize (payload memory) initialized)]
         (if (or (!= status 0) (or (!= (load initialized) (.fields schema))
                                 (!= (p/call-ptr (.validate schema) (payload memory)) 0)))
           (do (p/call-ptr (.abort schema) (payload memory) (load initialized))
@@ -100,6 +101,8 @@
               (a/free-bytes (.allocator heap) memory (.alignment schema))
               (p/cast (ptr Handle) 0))
             (Some [handle] (al/al-push! (field heap handles) handle) handle)))))))
+(defn new! [(heap (ptr Heap)) (schema (ptr Schema))] (-> (ptr Handle))
+  (if (known? heap schema) (new-with! heap schema (.initialize schema)) (p/cast (ptr Handle) 0)))
 (defn root [(heap (ptr Heap)) (id i64)] (-> (ptr Handle))
   (block :done
     (for [i 0 (al/al-len (.roots heap))]
@@ -117,7 +120,8 @@
     (list/push! (field heap roots) (Root :id id :handle handle))))
 ;;; A proposed new initializer or physical version never resets an existing
 ;;; root. Migration changes its payload through the graph transaction instead.
-(defn root! [(heap (ptr Heap)) (id i64) (schema (ptr Schema))] (-> (ptr Handle))
+(defn root-with! [(heap (ptr Heap)) (id i64) (schema (ptr Schema))
+  (initialize (fnptr c [(ptr i8) (ptr i64)] i64))] (-> (ptr Handle))
   (assert (= (.phase heap) 0))
   (block :done
     (unless (and (> id 0) (known? heap schema)) (break :done (p/cast (ptr Handle) 0)))
@@ -127,10 +131,13 @@
                       existing (p/cast (ptr Handle) 0)))))
     (unless (= (list/reserve! (field heap roots) (+ (al/al-len (.roots heap)) 1)) 0)
       (break :done (p/cast (ptr Handle) 0)))
-    (let [handle (new! heap schema)]
+    (let [handle (new-with! heap schema initialize)]
       (when (!= (p/cast i64 handle) 0)
         (al/al-push! (field heap roots) (Root :id id :handle handle)))
       handle)))
+
+(defn root! [(heap (ptr Heap)) (id i64) (schema (ptr Schema))] (-> (ptr Handle))
+  (if (known? heap schema) (root-with! heap id schema (.initialize schema)) (p/cast (ptr Handle) 0)))
 
 (defn cancelled? [(flag (ptr i64))] (-> bool)
   (and (!= (p/cast i64 flag) 0) (!= (atomic/atomic-load flag) 0)))
@@ -224,6 +231,28 @@
   (set! (.len (field heap staged)) 0)
   (relocation/reset! (field heap journal))
   (set! (.phase heap) 0) 0)
+(defn schema-retained? [(heap (ptr Heap)) (schema (ptr Schema)) (constructible (slice (ptr Schema)))] (-> bool)
+  (block :done
+    (for [i 0 (slice/slice-len constructible)]
+      (when (= (slice/slice-get constructible i) schema) (break :done true)))
+    (for [i 0 (al/al-len (.handles heap))]
+      (when (= (.schema (al/al-get (.handles heap) i)) schema) (break :done true)))
+    false))
+;;; A controller may retire completed transition metadata after publishing an
+;;; entire layout epoch. It supplies schemas still available for construction;
+;;; actual handle layouts remain retained independently of that list.
+(defn collect-schemas! [(heap (ptr Heap)) (constructible (slice (ptr Schema)))] (-> i64)
+  (assert (= (.phase heap) 0))
+  (set! (.len (field heap edges)) 0)
+  (let [(mut kept) 0]
+    (for [i 0 (al/al-len (.schemas heap))]
+      (let [schema (al/al-get (.schemas heap) i)]
+        (if (schema-retained? heap schema constructible)
+          (do (al/al-set! (field heap schemas) (load kept) schema)
+              (set! kept (+ (load kept) 1)) 0)
+          (a/destroy [Schema] (.allocator heap) schema))))
+    (set! (.len (field heap schemas)) (load kept))) 0)
+
 (defn savepoint [(heap (ptr Heap))] (-> Savepoint)
   (assert (= (.phase heap) 0))
   (Savepoint :epoch (.epoch heap) :schemas (al/al-len (.schemas heap)) :edges (al/al-len (.edges heap))

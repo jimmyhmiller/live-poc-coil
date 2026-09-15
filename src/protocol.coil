@@ -11,6 +11,7 @@
 (import "live-poc-coil.source" :as source)
 (import "live-poc-coil.pending" :as pending)
 (import "live-poc-coil.jobs" :as jobs)
+(import "live-poc-coil.managed" :as managed)
 
 (extern snprintf :cc c [(ptr i8) u64 (ptr i8) ...] (-> i32))
 (extern arc4random_buf :cc c [(ptr i8) u64] (-> void))
@@ -132,7 +133,12 @@
             (b/response-status-pair! (mut response) "interrupt-requested" "done"))
         (= (.op request) "status")
           (do (jobs/inspect! (mut response))
+              (session/metadata-lock!)
               (number! (mut response) "revision" (session/current-revision))
+              (number! (mut response) "schema-epoch" (atomic/atomic-load (field (managed/state) epoch)))
+              (number! (mut response) "state-phase" (atomic/atomic-load (field (managed/state) phase)))
+              (number! (mut response) "state-condition" (atomic/atomic-load (field (managed/state) condition)))
+              (session/metadata-unlock!)
               (seconds! (mut response) "now" (metrics/now))
               (let [queue (field (session/instance) pending)]
                 (pending/lock! queue)

@@ -205,3 +205,32 @@
       (assert (!= (p/cast i64 (graph/register! heap (schema2))) 0)))
     (graph/destroy! heap)
     (assert (= (.retired (audit)) 1))))
+
+(defn initialize-left [(target (ptr i8)) (prefix (ptr i64))] (-> i64)
+  (initialize target prefix)
+  (set! (.value (p/cast (ptr Node1) target)) 31) 0)
+(defn initialize-right [(target (ptr i8)) (prefix (ptr i64))] (-> i64)
+  (initialize target prefix)
+  (set! (.value (p/cast (ptr Node1) target)) 47) 0)
+(defn initialize-failed [(target (ptr i8)) (prefix (ptr i64))] (-> i64)
+  (initialize target prefix) -80)
+(deftest root-specific-initializers-preserve-existing-state-and-clean-failed-ownership
+  (store! (audit) (p/zeroed Audit))
+  (let [heap (p/alloc-stack graph/Heap)]
+    (graph/init! heap (a/malloc-allocator))
+    (let [schema (graph/register! heap (schema1))
+          left (graph/root-with! heap 1 schema (p/fnptr-of initialize-left))
+          right (graph/root-with! heap 2 schema (p/fnptr-of initialize-right))]
+      (assert (= (.value (p/cast (ptr Node1) (graph/payload (.memory left)))) 31))
+      (assert (= (.value (p/cast (ptr Node1) (graph/payload (.memory right)))) 47))
+      ; A replacement initializer that would fail must never run for this root.
+      (assert (= (graph/root-with! heap 1 schema (p/fnptr-of initialize-failed)) left))
+      (assert (= (.aborted (audit)) 0))
+      (assert (= (.value (p/cast (ptr Node1) (graph/payload (.memory left)))) 31))
+      (assert (= (p/cast i64 (graph/root-with! heap 3 schema (p/fnptr-of initialize-failed))) 0))
+      (assert (= (.aborted (audit)) 1))
+      (assert (= (p/cast i64 (graph/root heap 3)) 0))
+      (let [third (graph/root-with! heap 3 schema (p/fnptr-of initialize-right))]
+        (assert (= (.value (p/cast (ptr Node1) (graph/payload (.memory third)))) 47))))
+    (graph/destroy! heap))
+  (assert (= (.retired (audit)) 3)))
