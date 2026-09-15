@@ -1,5 +1,6 @@
 (module live-poc-coil.session)
 (import "coil.primitive" :as p)
+(import "live-poc-coil.control" :as control)
 (import "coil.alloc" :as a)
 (import "coil.arraylist" :as al)
 (import "coil.jit" :as jit)
@@ -17,6 +18,7 @@
 
 ;;; One application world per host process. Editor connections share this world.
 ;;; The process owns this stable bridge for the complete native session lifetime.
+(defstruct SourceOutcome [(index i64) (condition i64)])
 (defstruct Session
   [(arena scratch/ScratchArena)
    (compiler jit/JitSession)
@@ -24,6 +26,8 @@
    (runtime rt/Runtime)
    (pending pending/Queue)
    (writer sync/Mutex)
+   (metadata sync/Mutex)
+   (outcomes (al/ArrayList SourceOutcome))
    (staging (ptr rt/View))
    (evaluation (ptr i8))
    (result (slice u8))
@@ -51,8 +55,12 @@
   (rt/block! (.staging (instance)) id condition))
 (defn stage-source [(module (ptr u8)) (module-length i64) (name (ptr u8)) (name-length i64) (condition i64)] (-> i64)
   (assert (!= (p/cast i64 (.staging (instance))) 0))
-  (source/stage-condition! (field (instance) sources)
-    (slice/slice-new module module-length) (slice/slice-new name name-length) condition))
+  (metadata-lock!)
+  (let [index (source/find (field (instance) sources)
+               (slice/slice-new module module-length) "defn" (slice/slice-new name name-length))]
+    (assert (>= index 0))
+    (al/al-push! (field (instance) outcomes) (SourceOutcome :index index :condition condition)))
+  (metadata-unlock!))
 (export-c [stage-blocked :as "lpc_stage_blocked"] [stage-source :as "lpc_stage_source"])
 
 (defn stage-evaluation [(address (fnptr c [] i64))] (-> i64)
@@ -85,10 +93,14 @@
   (let [s (instance)]
     (assert (not (.initialized s)))
     (assert (= (rt/init! (field s runtime)) 0))
+    (assert (= (control/init!) 0))
     (pending/init! (field s pending) 1024)
     (match (sync/mutex-init (field s writer))
       (Ok [_] 0)
       (Err [_] (a/oom-at c"writer mutex" 0)))
+    (match (sync/mutex-init (field s metadata))
+      (Ok [_] 0) (Err [_] (a/oom-at c"metadata mutex" 0)))
+    (set! (.outcomes s) (al/al-new [SourceOutcome] (a/malloc-allocator)))
     (scratch/scratch-init (field s arena) (a/malloc-allocator))
     (let [toolchain (getenv c"LPC_TOOLCHAIN")]
       (set! (.compiler s) (jit/jit-session-new-with-toolchain (scratch/scratch-allocator (field s arena))
@@ -112,6 +124,19 @@
   (match (sync/mutex-unlock! (field (instance) writer))
     (Ok [n] n)
     (Err [_] (a/oom-at c"writer unlock" 0))))
+
+(defn metadata-lock! [] (-> i64)
+  (match (sync/mutex-lock! (field (instance) metadata))
+    (Ok [n] n) (Err [_] (a/oom-at c"metadata lock" 0))))
+(defn metadata-unlock! [] (-> i64)
+  (match (sync/mutex-unlock! (field (instance) metadata))
+    (Ok [n] n) (Err [_] (a/oom-at c"metadata unlock" 0))))
+(defn set-diagnostic! [(text (slice u8))] (-> i64)
+  (metadata-lock!)
+  (source/replace! (field (field (instance) sources) diagnostic) text)
+  (metadata-unlock!))
+(defn cancelled? [(flag (ptr i64))] (-> bool)
+  (and (!= (p/cast i64 flag) 0) (!= (atomic/atomic-load flag) 0)))
 
 (defn collect! [] (-> i64)
   (let [s (instance)
@@ -160,7 +185,7 @@
           (str/sb-push-str! (mut out) " "))))
     (str/sb-push-str! (mut out) "])")
     (str/sb-finish! (mut out))))
-(defn prepare-repair! [(allocator (dyn a/Allocator)) (compiler (ptr jit/JitSession)) (text (slice u8))] (-> i64)
+(defn prepare-repair! [(allocator (dyn a/Allocator)) (compiler (ptr jit/JitSession)) (text (slice u8)) (cancel (ptr i64))] (-> i64)
   (let [(mut ids) (repair-identities allocator compiler)]
     (if (= (al/al-len (load ids)) 0) 1
       (let [(mut status) (jit/jit-prepare-with-entry! compiler text (repair-entry allocator (load ids) -1))]
@@ -169,14 +194,16 @@
           ; from another bad body; never turn those into independent conditions.
           ; These are compiler-only candidates: no application code executes.
           (for [i 0 (al/al-len (load ids))]
+            (when (cancelled? cancel) (break))
             (let [id (al/al-get (load ids) i)]
               (set! status (jit/jit-prepare-with-entry! compiler text (repair-entry allocator (load ids) id)))
               (when (= (load status) 0) (al/al-set! (mut ids) i -1))))
-          (set! status (jit/jit-prepare-with-entry! compiler text (repair-entry allocator (load ids) -1))))
+          (unless (cancelled? cancel)
+            (set! status (jit/jit-prepare-with-entry! compiler text (repair-entry allocator (load ids) -1)))))
         (load status)))))
 
-(defn submit-mode! [(source (slice u8)) (deferred bool)] (-> i64)
-  (let [received (metrics/now)]
+(defn submit-at! [(source (slice u8)) (deferred bool) (received f64) (cancel (ptr i64)) (committed (ptr i64))] (-> i64)
+  (do
     (writer-lock!)
     (let [s (instance) r (field s runtime) candidate (rt/clone-current! r)
           start (metrics/now) (mut status) 0 (mut blocked) false
@@ -185,27 +212,42 @@
       (source/replace! (field s result) "")
       (set! (.result-overflow s) false)
       (set! (.evaluation s) (p/cast (ptr i8) 0))
+      (set! (.len (field s outcomes)) 0)
+      (metadata-lock!)
       (source/begin! (field s sources) source)
+      (metadata-unlock!)
       (set! (.staging s) candidate)
       (let [prepared (source/prepare (scratch/scratch-allocator input-arena) source)]
+        (if (cancelled? cancel)
+          (do (set! status 3) (set-diagnostic! "request interrupted before publication"))
         (if (or (!= (.diagnostic prepared) "")
                 (and (.evaluation prepared) (rt/blocked? r)))
-          (do (source/replace! (field (field s sources) diagnostic)
+          (do (set-diagnostic!
                 (if (!= (.diagnostic prepared) "") (.diagnostic prepared)
                   "expression admission while functions are blocked requires dependency coverage"))
               (set! status 1) 0)
           (do
             (set! status (jit/jit-prepare-with-entry! (field s compiler) (.text prepared) "(live-poc-coil.meta/publish)"))
             (when (!= (load status) 0)
-              (source/replace! (field (field s sources) diagnostic) (jit/jit-diagnostic (field s compiler)))
+              (set-diagnostic! (jit/jit-diagnostic (field s compiler)))
               (when (and deferred (not (.evaluation prepared)))
-                (set! status (prepare-repair! (scratch/scratch-allocator input-arena) (field s compiler) (.text prepared)))
+                (set! status (prepare-repair! (scratch/scratch-allocator input-arena) (field s compiler) (.text prepared) cancel))
                 (set! blocked (= (load status) 0))))
-            0)))
+            0))))
+      (when (cancelled? cancel)
+        (when (jit/jit-prepared? (field s compiler)) (jit/jit-abort-prepared! (field s compiler)))
+        (set! status 3)
+        (set-diagnostic! "request interrupted before publication"))
       (when (= (load status) 0)
         (set! status (jit/jit-publish-prepared! (field s compiler)))
         (when (!= (load status) 0)
-          (source/replace! (field (field s sources) diagnostic) (jit/jit-diagnostic (field s compiler)))))
+          (set-diagnostic! (jit/jit-diagnostic (field s compiler)))))
+      (metadata-lock!)
+      (when (= (load status) 0)
+        (for [i 0 (al/al-len (.outcomes s))]
+          (let [outcome (al/al-get (.outcomes s) i)
+                form (al/al-elem [source/Form] (field (field s sources) forms) (.index outcome))]
+            (set! (.condition form) (.condition outcome)))))
       (source/finish! (field s sources) (load status)
         (if (= (load status) 0) (.revision candidate) (current-revision))
         (if (and (= (load status) 0) (not (load blocked))) "" (.diagnostic (.sources s))))
@@ -217,12 +259,16 @@
             ; Install timing storage before the new view can be drawn.
             (metrics/record! (.revision candidate) received start end (metrics/now))
             (rt/publish! r candidate)
-            (atomic/atomic-store (published-epoch) (.revision candidate)))
+            (atomic/atomic-store (published-epoch) (.revision candidate))
+            (when (!= (p/cast i64 committed) 0) (atomic/atomic-store committed 1)))
           (rt/drop-view! candidate)))
+      (metadata-unlock!)
       (when (and (= (load status) 0) (!= (p/cast i64 (.evaluation s)) 0))
+        (assert (= (control/bind! cancel) 0))
         (enter!)
         (p/call-ptr (p/cast (fnptr c [] i64) (.evaluation s)))
-        (leave!))
+        (leave!)
+        (assert (= (control/unbind!) 0)))
       (set! (.evaluation s) (p/cast (ptr i8) 0))
       (set! (.staging s) (p/cast (ptr rt/View) 0))
       ; The accepted native view is usable now. Compact its owned compiler
@@ -234,6 +280,8 @@
       (collect!)
       (writer-unlock!)
       (if (and (= (load status) 0) (load blocked)) 2 (load status)))))
+(defn submit-mode! [(source (slice u8)) (deferred bool)] (-> i64)
+  (submit-at! source deferred (metrics/now) (p/cast (ptr i64) 0) (p/cast (ptr i64) 0)))
 (defn submit! [(source (slice u8))] (-> i64) (submit-mode! source false))
 (defn submit-deferred! [(source (slice u8))] (-> i64) (submit-mode! source true))
 (defn diagnostic [] (-> (slice u8))
@@ -260,9 +308,12 @@
           (assert (= (jit/jit-reset! (field s compiler)) 0))
           (scratch/scratch-close! (field s arena))
           (rt/destroy! r)
+          (assert (= (control/destroy!) 0))
           (pending/destroy! (field s pending))
           (metrics/destroy!)
           (source/destroy! (field s sources))
+          (al/al-free! (field s outcomes))
+          (sync/mutex-destroy! (field s metadata))
           (a/free (a/malloc-allocator) (.result s))
           (set! (.initialized s) false)
           (writer-unlock!)

@@ -8,9 +8,11 @@ Build the session in `live-poc-coil`. Use `paper-test` as the real application d
 
 ## Current checkpoint — September 15, 2026
 
-The native immutable-view runtime, authenticated protocol, real Paper host and presentation timing are implemented. The 1,000-edit color workload passed: median 42.2 ms, p99 50.0 ms, maximum 77.1 ms, zero misses (20 declared warm-ups). Raw records: `build/deferred-paper-1000.json`. Visible inspection confirmed changed color and preserved click count; automated fresh-render pixel comparison remains outstanding. This run predates source-ledger integration and must be repeated for the final implementation.
+Native immutable views, typed stable function handles, semantic blocked-entry repair, desired/accepted source tracking, typed expression results, owned pending input, and the real Paper host are implemented. The latest archived Python run presented all 1,000 measured color edits: median 45.19 ms, p99 53.33 ms, maximum 71.76 ms, zero misses. Every sample recorded an active, visible 1280 × 960 Paper window. See `docs/measurements/README.md` for raw records and measurement limits.
 
-The Emacs nREPL client has passed unsaved-buffer and successive-definition integration tests. Desired/accepted source tracking is being integrated. Typed expression results, semantic blocked-entry repair, persistent schema migration, watcher and broader durability gates remain unfinished.
+The actual Emacs unsaved-buffer path also completed 1,000 measured edits. Its wall-clock limitations and telemetry recovery are documented with the archive. Visual inspection proved that a click queued behind a blocked callback runs once after repair, with state preserved.
+
+A dedicated compiler worker and responsive socket control lane are being validated. Thirty-three native tests and real socket tests cover cooperative interruption, queued cancellation, source inspection, framing, idempotent retries, and disconnected response ownership. This checkpoint does not complete the design: managed schema migration, file synchronization, streamed output, exact fresh-render pixel comparison, and broader durability gates remain outstanding.
 
 The sections below specify the complete intended implementation and its remaining acceptance gates.
 

@@ -1,0 +1,10 @@
+(module live-poc-coil.server-test)
+(import "coil.socket" :as socket)
+(import "live-poc-coil.server" :as server)
+(deftest nonblocking-retries-use-the-io-error-payload
+  (assert (server/retryable? (socket/IoFailed 35)))
+  (assert (server/retryable? (socket/IoFailed 11)))
+  (assert (server/retryable? (socket/IoFailed 4)))
+  (assert (not (server/retryable? (socket/IoFailed 32))))
+  (assert (not (server/retryable? (socket/Closed))))
+  (assert (not (server/retryable? (socket/ConnectFailed 35)))))

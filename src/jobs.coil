@@ -1,0 +1,173 @@
+(module live-poc-coil.jobs)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.atomic" :as atomic)
+(import "coil.scratch" :as scratch)
+(import "coil.slice" :as slice)
+(import "coil.str" :as str)
+(import "coil.sync" :as sync)
+(import "coil.thread" :as thread)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "live-poc-coil.bencode" :as b)
+(import "live-poc-coil.runtime" :as rt)
+(cimport "fcntl.h" :use [fcntl O_NONBLOCK F_GETFL F_SETFL F_SETFD FD_CLOEXEC])
+(extern pipe :cc c [(ptr i32)] (-> i32))
+(extern read :cc c [i32 (ptr i8) u64] (-> i64))
+(extern write :cc c [i32 (ptr i8) u64] (-> i64))
+(extern close :cc c [i32] (-> i32))
+
+;;; Request/response memory is owned by the job. The executor and network each
+;;; hold a reference; disconnect releases only the network's reference. A
+;;; timeout or disconnect does not implicitly repeat or cancel an edit.
+;;; phase: 0 queued, 1 executing, 2 response ready (release/acquire via atomics).
+(defstruct Job [(refs i64) (phase i64) (cancel i64) (committed i64)
+  (arena scratch/ScratchArena) (request b/Request) (received f64) (response (slice u8))])
+(defstruct Queue [(mutex sync/Mutex) (changed sync/Event) (active (al/ArrayList (ptr Job)))
+  (worker thread/Thread) (execute (fnptr c [(ptr Job)] i64))
+  (wake-read i32) (wake-write i32) (closed bool) (initialized bool)])
+(defn state [] (-> (ptr Queue)) (p/alloc-static Queue))
+(defn lock! [] (-> i64)
+  (match (sync/mutex-lock! (field (state) mutex)) (Ok [n] n) (Err [_] (a/oom-at c"job lock" 0))))
+(defn unlock! [] (-> i64)
+  (match (sync/mutex-unlock! (field (state) mutex)) (Ok [n] n) (Err [_] (a/oom-at c"job unlock" 0))))
+(defn release! [(job (ptr Job))] (-> i64)
+  (let [old (atomic/atomic-sub (field job refs) 1)]
+    (assert (> old 0))
+    (when (= old 1)
+      (scratch/scratch-close! (field job arena)) (rt/free-one! job)))
+  0)
+(defn ready? [(job (ptr Job))] (-> bool) (= (atomic/atomic-load (field job phase)) 2))
+(defn signal-network! [] (-> i64)
+  (let [byte (p/alloc-stack i8)]
+    (store! byte 1)
+    (loop
+      (let [n (write (.wake-write (state)) byte 1)]
+        (when (= n 1) (break))
+        (let [error (os/os-errno)]
+          (unless (= error 4)
+            ; A full nonblocking pipe already represents a pending wakeup.
+            (assert (and (< n 0) (or (= error 11) (= error 35))))
+            (break))))))
+  0)
+(defn drain-network! [] (-> i64)
+  (let [bytes (p/alloc-stack (array i8 256))]
+    (loop
+      (let [n (read (.wake-read (state)) (p/cast (ptr i8) bytes) 256)]
+        (when (and (<= n 0) (not (and (< n 0) (= (os/os-errno) 4)))) (break)))))
+  0)
+(defn enqueue! [(wire (slice u8)) (received f64)] (-> (ptr Job))
+  (lock!)
+  (let [q (state)]
+    (if (or (.closed q) (>= (al/al-len (.active q)) 64))
+      (do (unlock!) (p/cast (ptr Job) 0))
+      (let [job (a/box! (a/malloc-allocator) Job (p/zeroed Job))]
+        (set! (.refs job) 2)
+        (set! (.received job) received)
+        (scratch/scratch-init (field job arena) (a/malloc-allocator))
+        (let [(mut copy) (str/sb-new (scratch/scratch-allocator (field job arena)))]
+          (str/sb-push-str! (mut copy) wire)
+          (assert (= (b/bdecode-request (str/sb-str (load copy)) (field job request)) (slice/slice-len wire))))
+        (al/al-push! (field q active) job)
+        (unlock!)
+        (sync/event-notify-all! (field q changed))
+        job))))
+(defn interrupt! [(id (slice u8))] (-> i64)
+  (block :done
+  (unless (.initialized (state)) (break :done 0))
+  (lock!)
+  (let [(mut count) 0]
+    (for [i 0 (al/al-len (.active (state)))]
+      (let [job (al/al-get (.active (state)) i)]
+        (when (and (= (.id (.request job)) id) (not (ready? job)))
+          (atomic/atomic-store (field job cancel) 1)
+          (set! count (+ (load count) 1)))))
+    (unlock!)
+    (load count))))
+(defn inspect! [(response (mut b/Response))] (-> i64)
+  (block :done
+  (unless (.initialized (state)) (break :done 0))
+  (lock!)
+  (let [(mut queued) 0]
+    (for [i 0 (al/al-len (.active (state)))]
+      (let [job (al/al-get (.active (state)) i) phase (atomic/atomic-load (field job phase))]
+        (when (= phase 0) (set! queued (+ (load queued) 1)) 0)
+        (when (= phase 1)
+          (b/response-string! response "compiler-active-request" (.id (.request job))) 0)))
+    (let [(mut value) (str/sb-new (a/malloc-allocator))]
+      (str/sb-push-i64! (mut value) (load queued))
+      (b/response-string! response "compiler-queued" (str/sb-str (load value)))
+      (str/sb-free! (mut value))))
+  (unlock!)))
+(defn worker [(unused (ptr i8))] (-> (ptr i8))
+  (let [q (state)]
+    (loop
+      (lock!)
+      (let [(mut selected) (p/cast (ptr Job) 0)
+            generation (match (sync/event-generation (field q changed)) (Ok [n] n) (Err [_] -1))]
+        (assert (>= generation 0))
+        (for [i 0 (al/al-len (.active q))]
+          (let [job (al/al-get (.active q) i)]
+            (when (= (atomic/atomic-load (field job phase)) 0)
+              (set! selected job) (atomic/atomic-store (field job phase) 1) (break))))
+        (let [job (load selected) finished (and (.closed q) (= (p/cast i64 (load selected)) 0))]
+          (unlock!)
+          (when finished (break))
+          (if (= (p/cast i64 job) 0)
+            (do (sync/event-wait! (field q changed) generation) 0)
+            (do
+              (p/call-ptr (.execute q) job)
+              (assert (> (slice/slice-len (.response job)) 0))
+              (atomic/atomic-store (field job phase) 2)
+              (lock!)
+              (let [(mut kept) 0]
+                (for [i 0 (al/al-len (.active q))]
+                  (let [other (al/al-get (.active q) i)]
+                    (when (!= other job)
+                      (al/al-set! (field q active) (load kept) other)
+                      (set! kept (+ (load kept) 1)) 0)))
+                (set! (.len (field q active)) (load kept)))
+              (unlock!)
+              (signal-network!)
+              (release! job)))))))
+  (p/cast (ptr i8) 0))
+(defn init! [(execute (fnptr c [(ptr Job)] i64))] (-> i64)
+  (let [q (state) fds (p/alloc-stack (array i32 2))]
+    (assert (not (.initialized q)))
+    (store! q (p/zeroed Queue))
+    (match (sync/mutex-init (field q mutex)) (Ok [_] 0) (Err [_] (a/oom-at c"job mutex" 0)))
+    (match (sync/event-init (field q changed)) (Ok [_] 0) (Err [_] (a/oom-at c"job event" 0)))
+    (set! (.active q) (al/al-new [(ptr Job)] (a/malloc-allocator)))
+    (al/al-reserve! (field q active) 64)
+    (assert (= (pipe (p/cast (ptr i32) fds)) 0))
+    (for [i 0 2]
+      (let [fd (load (p/index fds i)) flags (fcntl fd F_GETFL)]
+        (assert (>= flags 0))
+        (assert (= (fcntl fd F_SETFL (| flags O_NONBLOCK)) 0))
+        (assert (= (fcntl fd F_SETFD FD_CLOEXEC) 0))))
+    (set! (.wake-read q) (load (p/index fds 0)))
+    (set! (.wake-write q) (load (p/index fds 1)))
+    (set! (.execute q) execute)
+    (set! (.initialized q) true)
+    (assert (= (thread/thread-spawn-configured (field q worker) (p/fnptr-of worker) (p/cast (ptr i8) 0)
+                (thread/thread-config 33554432 16384)) 0)))
+  0)
+(defn close! [] (-> i64)
+  (lock!)
+  (set! (.closed (state)) true)
+  (for [i 0 (al/al-len (.active (state)))]
+    (atomic/atomic-store (field (al/al-get (.active (state)) i) cancel) 1))
+  (unlock!)
+  (sync/event-notify-all! (field (state) changed))
+  0)
+(defn destroy! [] (-> i64)
+  (let [q (state)]
+    (assert (.closed q))
+    (assert (= (thread/thread-join (field q worker)) 0))
+    (assert (= (al/al-len (.active q)) 0))
+    (close (.wake-write q)) (close (.wake-read q))
+    (al/al-free! (field q active))
+    (sync/event-destroy! (field q changed)) (sync/mutex-destroy! (field q mutex))
+    (set! (.initialized q) false))
+  0)

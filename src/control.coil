@@ -1,0 +1,19 @@
+(module live-poc-coil.control)
+(import "coil.primitive" :as p)
+(import "coil.atomic" :as atomic)
+(cimport "pthread.h" :use [pthread_key_create pthread_key_delete pthread_getspecific pthread_setspecific])
+;;; Cancellation belongs to one evaluation on one thread. UI callbacks and
+;;; nested native callbacks on other threads never inherit another job's flag.
+(defn key [] (-> (ptr u64)) (p/alloc-static u64))
+(defn init! [] (-> i32)
+  (pthread_key_create (key) (p/cast (fnptr c [(ptr i8)] void) (p/cast (ptr i8) 0))))
+(defn bind! [(flag (ptr i64))] (-> i32)
+  (assert (= (p/cast i64 (pthread_getspecific (load (key)))) 0))
+  (pthread_setspecific (load (key)) (p/cast (ptr i8) flag)))
+(defn unbind! [] (-> i32)
+  (pthread_setspecific (load (key)) (p/cast (ptr i8) 0)))
+(defn cancelled-native [] (-> i64)
+  (let [flag (p/cast (ptr i64) (pthread_getspecific (load (key))))]
+    (if (= (p/cast i64 flag) 0) 0 (atomic/atomic-load flag))))
+(export-c [cancelled-native :as "lpc_cancelled"])
+(defn destroy! [] (-> i32) (pthread_key_delete (load (key))))

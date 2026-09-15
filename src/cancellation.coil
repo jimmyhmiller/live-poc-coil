@@ -1,0 +1,6 @@
+(module live-poc-coil.cancellation)
+(extern lpc_cancelled :cc c [] (-> i64))
+;;; Cooperative polling: this does not unwind native stacks or undo effects.
+;;; An interrupt before publication rejects the edit; after publication the
+;;; evaluation may stop at an application-chosen safe point.
+(defn cancelled? [] (-> bool) (!= (lpc_cancelled) 0))

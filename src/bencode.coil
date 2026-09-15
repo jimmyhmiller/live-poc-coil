@@ -31,7 +31,7 @@
    (file (slice u8))
    (file-path (slice u8))
    (ns (slice u8))
-   (symbol (slice u8)) (ticket (slice u8))
+   (symbol (slice u8)) (ticket (slice u8)) (interrupt-id (slice u8))
    (prefix (slice u8))
    (project (slice u8))  ; optional canonical project identity for file clients
    (policy (slice u8))  ; coil/file-*: "strict" (default) or "deferred"
@@ -48,7 +48,7 @@
     :file ""
     :file-path ""
     :ns ""
-    :symbol "" :ticket ""
+    :symbol "" :ticket "" :interrupt-id ""
     :prefix ""
     :project ""
     :policy ""
@@ -111,6 +111,7 @@
         (text=? key "file-path") (set! (.file-path request) value)
         (text=? key "ns") (set! (.ns request) value)
         (text=? key "symbol") (set! (.symbol request) value)
+        (text=? key "interrupt-id") (set! (.interrupt-id request) value)
         (text=? key "ticket") (set! (.ticket request) value)
         (text=? key "prefix") (set! (.prefix request) value)
         (text=? key "project") (set! (.project request) value)

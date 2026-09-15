@@ -110,7 +110,7 @@
     (let [head (reader/sexp-nth f 0)]
       (if (not (reader/sexp-sym? head)) false
         (let [name (reader/sexp-sym head)]
-          (or (= name "live-poc-coil.meta/evaluate") (or (= name "checker") (or (= name "transform") (or (= name "deftrait") (or (= name "impl") (or (= name "cimport") (or (= name "extern") (or (= name "export-c") (or (= name "export") (or (= name "import") (or (= name "const") (or (= name "derive") (or (= name "module") (declaration? name)))))))))))))))))))
+          (or (= name "meta") (or (= name "live-poc-coil.meta/evaluate") (or (= name "checker") (or (= name "transform") (or (= name "deftrait") (or (= name "impl") (or (= name "cimport") (or (= name "extern") (or (= name "export-c") (or (= name "export") (or (= name "import") (or (= name "const") (or (= name "derive") (or (= name "module") (declaration? name))))))))))))))))))))
 (defstruct Prepared [(text (slice u8)) (diagnostic (slice u8)) (evaluation bool)])
 (defn prepare [(allocator (dyn a/Allocator)) (text (slice u8))] (-> Prepared)
   (match (reader/read-all allocator text 0)

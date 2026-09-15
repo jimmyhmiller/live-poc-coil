@@ -37,7 +37,10 @@ PY
 
 ## Protocol
 
-Bencoded string-keyed requests support `clone`, `describe`, `eval`, `load-file`, `source`, `status`, `metrics`, and `shutdown`. This is a documented nREPL subset. `eval` accepts concrete function definitions and expressions with typed `Debug` results. `load-file` reads the `file` field. Requests may include a `base-revision`; stale bases conflict. A duplicate mutation ID with identical input returns the original result; changing its input conflicts. Receipts are retained up to a declared limit of 4,096.
+Bencoded string-keyed requests support `clone`, `describe`, `eval`, `load-file`, `source`, `status`, `metrics`, `interrupt`, `cancel-input`, and `shutdown`. This is a documented nREPL subset. `eval` accepts concrete function definitions and expressions with typed `Debug` results. `load-file` reads the `file` field. Requests may include a `base-revision`; stale bases conflict. A duplicate mutation ID with identical input returns the original result; changing its input conflicts. Receipts are retained up to a declared limit of 4,096.
+
+Compilation runs on a dedicated worker. `status` and `source` remain responsive, including on a connection with an outstanding edit. `interrupt` takes `interrupt-id`; its acknowledgement means cancellation was requested. The original request determines the outcome: `interrupted` before publication, or a committed result with `interrupt: requested-after-publication` if publication already occurred. Running expressions can poll `live-poc-coil.cancellation/cancelled?` at safe points. This never forcibly unwinds a native stack or rolls back effects. Disconnecting does not cancel an edit. There are at most 64 active compiler jobs and 8 pending jobs per connection; responses and input queues are bounded.
+
 
 `eval` and `load-file` accept `policy: "deferred"` to publish typed blocked entries; strict rejection is the default. See [repair and callback contracts](docs/REPAIR.md). In Emacs, set buffer-local `coil-live-publication-policy` to `"deferred"`.
 
@@ -50,6 +53,8 @@ LPC_TOOLCHAIN="$(command -v coil)" coil test tests/session_test.coil
 coil test tests/source_test.coil
 coil test tests/presentation_test.coil
 python3 scripts/test_protocol.py  # fresh running headless host
+python3 scripts/test_repair_protocol.py
+python3 scripts/test_async_protocol.py
 emacs --batch -Q --eval '(progn (require (quote package)) (package-initialize))' \
   -L editor/emacs -l coil-live-test -f ert-run-tests-batch-and-exit
 python3 scripts/benchmark.py --count 1000 --warmup 20 \
@@ -58,10 +63,10 @@ python3 scripts/benchmark.py --count 1000 --warmup 20 \
 
 The latest 1,000-edit color run passed with median 45.2 ms, p99 53.3 ms and maximum 71.8 ms; zero misses including clock uncertainty. Every frame reported the app active and window visible. The measured Paper render was 1280 × 960 at scale 2 with a 16.67 ms frame duration. [Raw measurements and limits](docs/measurements/README.md) include Python and actual unsaved Emacs runs.
 
-Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 30 passing tests, both protocol scripts pass, and three Emacs integration tests pass.
+Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 33 passing tests, all three protocol scripts pass, and three Emacs integration tests pass.
 
 ## Remaining scope
 
-This implementation is in progress. Persistent-state schema migration, output streaming, compile/evaluation cancellation, watcher integration, automated pixel comparison and broader retention/failure gates remain. Direct semantic repair and input cancellation work; unanalysed calls use conservative admission, and expressions are rejected while any function is blocked. Live generic and attributed function definitions receive capability diagnostics; use `defn*` for static helpers. Arbitrary native-stack continuation repair is outside the design.
+This implementation is in progress. Persistent-state schema migration, output streaming, watcher integration, automated pixel comparison and broader retention/failure gates remain. Direct semantic repair and input cancellation work; unanalysed calls use conservative admission, and expressions are rejected while any function is blocked. Live generic and attributed function definitions receive capability diagnostics; use `defn*` for static helpers. Arbitrary native-stack continuation repair is outside the design.
 
 See [the complete plan](docs/PLAN.md) and project notebook `live-poc-coil` for contracts, measurements and external bugs.
