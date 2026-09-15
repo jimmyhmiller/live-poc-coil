@@ -1,0 +1,18 @@
+(module live-poc-coil.native-contracts)
+(import "coil.primitive" :as p)
+;;; Host ABI contract: these entry points never invoke live application code.
+;;; Their implementations live in the single native Paper host. Callback-taking
+;;; run entry points are deliberately absent. Arguments are still analyzed by
+;;; the caller, so passing a live function does not erase its dependency.
+(defn leaf? [(declaration Code)] (-> bool)
+  (block :found
+    (unless (and (p/code-list? declaration) (>= (p/code-count declaration) 4)) (break :found false))
+    (unless (p/code-eq (p/code-nth declaration 2) `extern) (break :found false))
+    (let [names `(live-poc-coil.paper-api.begin live-poc-coil.paper-api.redraw
+                  live-poc-coil.paper-api.panel live-poc-coil.paper-api.caption
+                  live-poc-coil.paper-api.button live-poc-coil.paper-api.number
+                  live-poc-coil.paper-api.tick-interval)]
+      (for [i 0 (p/code-count names)]
+        (when (p/code-eq (p/code-nth declaration 3) (p/code-nth names i))
+          (break :found true))))
+    false))

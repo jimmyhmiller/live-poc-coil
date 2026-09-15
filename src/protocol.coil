@@ -10,6 +10,7 @@
 (import "live-poc-coil.metrics" :as metrics)
 (import "live-poc-coil.source" :as source)
 (import "live-poc-coil.pending" :as pending)
+(import "live-poc-coil.runtime" :as rt)
 (import "live-poc-coil.jobs" :as jobs)
 (import "live-poc-coil.managed" :as managed)
 
@@ -50,6 +51,10 @@
   (let [buffer (p/alloc-stack (array i8 32))]
     (snprintf (p/cast (ptr i8) buffer) 32 c"%lld" value)
     (b/response-string! response key (str/cstr->str (p/cast (ptr i8) buffer)))))
+(defn ticket-dict! [(response (ptr b/Response)) (ticket i64)] (-> i64)
+  (let [buffer (p/alloc-stack (array i8 32))]
+    (snprintf (p/cast (ptr i8) buffer) 32 c"%lld" ticket)
+    (b/response-dict-entry-start! response (str/cstr->str (p/cast (ptr i8) buffer)))))
 (defn seconds! [(response (ptr b/Response)) (key (slice u8)) (value f64)] (-> i64)
   (let [buffer (p/alloc-stack (array i8 64))]
     (snprintf (p/cast (ptr i8) buffer) 64 c"%.9f" value)
@@ -150,6 +155,21 @@
                 (when (> (al/al-len (.items queue)) 0)
                   (let [work (al/al-get (.items queue) 0)]
                     (number! (mut response) "first-input-ticket" (.ticket work))))
+                (b/response-dict-start! (mut response) "pending-input")
+                (let [runtime (field (session/instance) runtime)]
+                  (rt/lock! runtime)
+                  (for [i 0 (al/al-len (.items queue))]
+                    (let [work (al/al-get (.items queue) i)]
+                      (ticket-dict! (mut response) (.ticket work))
+                      (number! (mut response) "domain" (.domain work))
+                      (number! (mut response) "root" (.root work))
+                      (when (and (>= (.root work) 0) (< (.root work) (al/al-len (.entries (.current runtime)))))
+                        (let [entry (al/al-get (.entries (.current runtime)) (.root work))]
+                          (number! (mut response) "condition" (.condition entry))
+                          (number! (mut response) "opaque" (if (.opaque entry) 1 0))))
+                      (b/response-container-end! (mut response))))
+                  (rt/unlock! runtime))
+                (b/response-container-end! (mut response))
                 (pending/unlock! queue))
               (b/response-status! (mut response) "done"))
         (= (.op request) "cancel-input")

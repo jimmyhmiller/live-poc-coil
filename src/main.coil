@@ -18,8 +18,10 @@
   (let [project (getenv c"LPC_PROJECT")]
     (unless (= (p/cast i64 project) 0) (assert (= (chdir project) 0)) 0))
   (let [paper (or (< argc 2) (!= (str/cstr->str (load (p/index argv 1))) "--headless"))
+        fixture (let [path (getenv c"LPC_FIXTURE")]
+          (if (= (p/cast i64 path) 0) "fixtures/paper.coil" (str/cstr->str path)))
         source (if paper
-          (match (fs/read-file (a/malloc-allocator) "fixtures/paper.coil")
+          (match (fs/read-file (a/malloc-allocator) fixture)
             (Ok [text] text) (Err [_] ""))
           "(module live-demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 42)")]
     (assert (= (session/init!) 0))

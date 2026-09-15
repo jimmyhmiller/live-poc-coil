@@ -10,7 +10,7 @@ Desired source survives rejection independently of accepted source. A mixed defe
 
 A live function value contains a stable ID and typed gate. An invocation preflights its root and pins one immutable execution view under the same mutex. Nested calls use that view. An older invocation can finish while a newer view blocks or repairs the same function.
 
-Direct live references use Coil's resolved declaration identities, including cross-module names. Replacing a body replaces its outgoing edges. Calls through static helpers, externs, unanalysed globals or indirect calls conservatively depend on every blocked condition. This can defer unrelated work; precise cached dependency coverage for these cases remains unfinished. Typed expressions are currently rejected while any function is blocked because expression dependency admission is not yet implemented.
+Direct live references use Coil's resolved declaration identities, including cross-module names. Replacing a body replaces its outgoing edges. Checked static helper dependencies are followed transitively. Unknown externs, unanalysed globals and indirect calls conservatively depend on every blocked condition. The audited Paper drawing/redraw ABI has a non-reentrant host contract; callback-taking entry points are excluded. Checked scalar arithmetic retains its operand dependencies. Explicit Paper input routes preserve FIFO within each domain and let independent domains progress; see [the moving fixture](MOVING_PAPER.md). Typed expressions are currently rejected while any function is blocked because expression dependency admission is not yet implemented.
 
 ## Paper
 

@@ -9,8 +9,9 @@
 ;;; The queue owns each accepted payload and drops it once after execution or
 ;;; cancellation. Callbacks are stable host code. A single pump executes work;
 ;;; producers and cancellation may run concurrently. Admission checks the FIFO
-;;; head and pins its view before removing it, so new work cannot overtake it.
-(defstruct Work [(ticket i64) (root i64) (key i64) (payload (ptr i8))
+;;; head of each explicit ordering domain and pins its view before removal.
+;;; Domain zero preserves the original global FIFO contract.
+(defstruct Work [(ticket i64) (root i64) (domain i64) (key i64) (payload (ptr i8))
   (run (fnptr c [(ptr i8)] i64)) (drop (fnptr c [(ptr i8)] i64))])
 (defstruct Queue [(mutex sync/Mutex) (items (al/ArrayList Work)) (limit i64)
   (next i64) (running i64) (completed i64) (cancelled i64) (rejected i64) (coalesced i64) (closed bool)])
@@ -30,13 +31,13 @@
  ; key permits only replacement of the immediately preceding equivalent work;
  ; intervening input is never crossed. The original ticket identifies the
  ; merged event, and the superseded payload is dropped outside the queue lock.
-(defn enqueue-coalescing! [(q (ptr Queue)) (key i64) (root i64) (payload (ptr i8))
+(defn enqueue-domain! [(q (ptr Queue)) (domain i64) (key i64) (root i64) (payload (ptr i8))
   (run (fnptr c [(ptr i8)] i64)) (drop (fnptr c [(ptr i8)] i64))] (-> i64)
   (lock! q)
   (block :result
     (when (and (not (.closed q)) (and (> key 0) (> (al/al-len (.items q)) 0)))
       (let [tail (al/al-elem [Work] (field q items) (- (al/al-len (.items q)) 1))]
-        (when (and (= (.key tail) key) (and (= (.root tail) root)
+        (when (and (and (= (.domain tail) domain) (= (.key tail) key)) (and (= (.root tail) root)
                    (and (= (p/cast (ptr i8) (.run tail)) (p/cast (ptr i8) run))
                         (= (p/cast (ptr i8) (.drop tail)) (p/cast (ptr i8) drop)))))
           (let [old (.payload tail) ticket (.ticket tail)]
@@ -46,14 +47,17 @@
             (p/call-ptr drop old)
             (break :result ticket)))))
     (let [ticket (if (.closed q) -1
-        (if (or (< root 0) (= (.next q) 9223372036854775807)) -3
+        (if (or (< domain 0) (or (< root 0) (= (.next q) 9223372036854775807))) -3
           (if (>= (al/al-len (.items q)) (.limit q)) -2 (.next q))))]
       (if (> ticket 0)
-        (do (al/al-push! (field q items) (Work :ticket ticket :root root :key key :payload payload :run run :drop drop))
+        (do (al/al-push! (field q items) (Work :ticket ticket :root root :domain domain :key key :payload payload :run run :drop drop))
             (set! (.next q) (+ ticket 1)) 0)
         (do (set! (.rejected q) (+ (.rejected q) 1)) 0))
       (unlock! q)
       ticket)))
+(defn enqueue-coalescing! [(q (ptr Queue)) (key i64) (root i64) (payload (ptr i8))
+  (run (fnptr c [(ptr i8)] i64)) (drop (fnptr c [(ptr i8)] i64))] (-> i64)
+  (enqueue-domain! q 0 key root payload run drop))
 (defn enqueue! [(q (ptr Queue)) (root i64) (payload (ptr i8))
   (run (fnptr c [(ptr i8)] i64)) (drop (fnptr c [(ptr i8)] i64))] (-> i64)
   (enqueue-coalescing! q 0 root payload run drop))
@@ -68,19 +72,28 @@
   (block :result
     (when (or (.closed q) (> (.running q) 0)) (unlock! q) (break :result -1))
     (when (= (al/al-len (.items q)) 0) (unlock! q) (break :result 0))
-    (let [work (al/al-get (.items q) 0) view (rt/enter-root! runtime (.root work))]
-      (when (= (p/cast i64 view) 0) (unlock! q) (break :result 0))
-      (remove! q 0)
-      (set! (.running q) (.ticket work))
-      (unlock! q)
-      (p/call-ptr (.run work) (.payload work))
-      (rt/leave! runtime)
-      (p/call-ptr (.drop work) (.payload work))
-      (lock! q)
-      (set! (.running q) 0)
-      (set! (.completed q) (+ (.completed q) 1))
-      (unlock! q)
-      (.ticket work))))
+    (for [i 0 (al/al-len (.items q))]
+      (let [work (al/al-get (.items q) i) (mut first) true]
+        (for [j 0 i]
+          (let [prior (al/al-get (.items q) j)]
+            (when (= (.domain prior) (.domain work)) (set! first false))))
+        (when (load first)
+          (let [view (rt/enter-root! runtime (.root work))]
+            (unless (= (p/cast i64 view) 0)
+              (remove! q i)
+              (set! (.running q) (.ticket work))
+              (unlock! q)
+              (p/call-ptr (.run work) (.payload work))
+              (rt/leave! runtime)
+              (p/call-ptr (.drop work) (.payload work))
+              (lock! q)
+              (set! (.running q) 0)
+              (set! (.completed q) (+ (.completed q) 1))
+              (unlock! q)
+              (break :result (.ticket work)))))))
+    (unlock! q)
+    0))
+
 (defn cancel! [(q (ptr Queue)) (ticket i64)] (-> i64)
   (lock! q)
   (block :result

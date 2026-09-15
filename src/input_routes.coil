@@ -1,0 +1,32 @@
+(module live-poc-coil.input-routes)
+(import "coil.primitive" :as p)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.function" :as function)
+(defstruct Route [(kind i64) (id i64) (domain i64)
+  (handler (function/Function (fnptr c [i64 i64 f64 f64] i64)))])
+;;; An exact kind/id takes precedence over the same kind's id=-1 fallback.
+;;; The caller owns the immutable table for the entire selection and use.
+(defn select [(routes (slice Route)) (kind i64) (id i64)] (-> i64)
+  (let [(mut fallback) -1]
+    (block :found
+      (for [i 0 (slice/slice-len routes)]
+        (let [route (p/index (slice/slice-data routes) i)]
+          (when (= (.kind route) kind)
+            (when (= (.id route) id) (break :found i))
+            (when (= (.id route) -1) (set! fallback i)))))
+      (load fallback))))
+(defn valid? [(routes (slice Route))] (-> bool)
+  (block :result
+    (when (or (< (slice/slice-len routes) 0) (> (slice/slice-len routes) 64)) (break :result false))
+    (when (and (> (slice/slice-len routes) 0) (= (p/cast i64 (slice/slice-data routes)) 0)) (break :result false))
+    (for [i 0 (slice/slice-len routes)]
+      (let [route (p/index (slice/slice-data routes) i)]
+        (when (or (< (.kind route) 0) (or (< (.id route) -1) (<= (.domain route) 0)))
+          (break :result false))
+        (when (or (< (.id (field route handler)) 0) (= (p/cast i64 (p/cast (ptr i8) (.gate (field route handler)))) 0))
+          (break :result false))
+        (for [j 0 i]
+          (let [prior (p/index (slice/slice-data routes) j)]
+            (when (and (= (.kind prior) (.kind route)) (= (.id prior) (.id route)))
+              (break :result false))))))
+    true))

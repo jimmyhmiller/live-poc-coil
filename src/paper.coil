@@ -1,6 +1,8 @@
 (module live-poc-coil.paper)
 (import "coil.primitive" :as p)
 (import "coil.atomic" :as atomic)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.input-routes" :as routes)
 (import "paper.flow" :use *)
 (import "paper.platform" :as host)
 (import "paper.gpu" :as gpu)
@@ -17,6 +19,7 @@
 (import "live-poc-coil.protocol" :as protocol)
 (extern pthread_main_np :cc c [] (-> i32))
 (defstruct AppState [(served i64) (drawing i64) (running bool) (observer (ptr presentation/Observer))
+  (routes (array routes/Route 64)) (route-count i64)
   (tick-ready bool) (tick-last f64) (tick-clock f64) (draw-root i64) (event-root i64) (draw (fnptr c [] i64)) (event (fnptr c [i64 i64 f64 f64] i64))])
 (defn app-state [] (-> (ptr AppState)) (p/alloc-static AppState))
 (defn enter-draw [] (-> bool)
@@ -30,7 +33,7 @@
 (defn draw-trampoline [] (-> i64)
   (assert (= (pthread_main_np) 1))
   (p/call-ptr (.draw (app-state))))
-(defstruct Input [(kind i64) (id i64) (x f64) (y f64)])
+(defstruct Input [(kind i64) (id i64) (x f64) (y f64) (callback (fnptr c [i64 i64 f64 f64] i64))])
 (defn execute-input [(raw (ptr i8))] (-> i64)
   (assert (= (pthread_main_np) 1))
   (let [input (p/cast (ptr Input) raw)]
@@ -42,7 +45,7 @@
           (do (set! (.tick-ready state) true) (set! (.tick-clock state) actual) 0))
         (set! (.tick-last state) actual)
         (set! (.x input) (.tick-clock state))))
-    (p/call-ptr (.event (app-state)) (.kind input) (.id input) (.x input) (.y input))))
+    (p/call-ptr (.callback input) (.kind input) (.id input) (.x input) (.y input))))
 (defn drop-input [(raw (ptr i8))] (-> i64)
   (runtime/free-one! (p/cast (ptr Input) raw)))
 (defn pump-input [] (-> i64)
@@ -55,8 +58,15 @@
 (defn event-trampoline [(kind i64) (id i64) (x f64) (y f64)] (-> i64)
   (assert (= (pthread_main_np) 1))
   (if (not (.running (app-state))) 0
-    (let [input (alloc/box! (alloc/malloc-allocator) Input (Input :kind kind :id id :x x :y y))
-          ticket (pending/enqueue-coalescing! (field (session/instance) pending) (if (= kind 6) 6 0) (.event-root (app-state))
+    (let [state (app-state)
+          selected (routes/select (slice/slice-new (p/cast (ptr routes/Route) (field state routes)) (.route-count state)) kind id)
+          route (if (< selected 0) (p/cast (ptr routes/Route) 0)
+            (p/index (p/cast (ptr routes/Route) (field state routes)) selected))
+          root (if (< selected 0) (.event-root state) (.id (field route handler)))
+          domain (if (< selected 0) 0 (.domain route))
+          callback (if (< selected 0) (.event state) (.gate (field route handler)))
+          input (alloc/box! (alloc/malloc-allocator) Input (Input :kind kind :id id :x x :y y :callback callback))
+          ticket (pending/enqueue-domain! (field (session/instance) pending) domain (if (= kind 6) 6 0) root
             (p/cast (ptr i8) input) (p/fnptr-of execute-input) (p/fnptr-of drop-input))]
       (if (> ticket 0) (pump-input)
         (do (drop-input (p/cast (ptr i8) input))
@@ -120,9 +130,18 @@
       (host/paper_redraw)))
   true)
 (defn run! [(draw-root i64) (draw-callback (fnptr c [] i64)) (event-root i64) (event-callback (fnptr c [i64 i64 f64 f64] i64))] (-> i64)
+  (run-routed! draw-root draw-callback event-root event-callback (p/cast (ptr routes/Route) 0) 0))
+(defn run-routed! [(draw-root i64) (draw-callback (fnptr c [] i64)) (event-root i64)
+  (event-callback (fnptr c [i64 i64 f64 f64] i64)) (table (ptr routes/Route)) (count i64)] (-> i64)
+  (block :run
+  (when (or (< count 0) (and (> count 0) (= (p/cast i64 table) 0))) (break :run -1))
+  (unless (routes/valid? (slice/slice-new table count)) (break :run -1))
   (assert (= (pthread_main_np) 1))
   (assert (not (.running (app-state))))
   (set! (app-state) (p/zeroed AppState))
+  (set! (.route-count (app-state)) count)
+  (for [i 0 count]
+    (store! (p/index (p/cast (ptr routes/Route) (field (app-state) routes)) i) (load (p/index table i))))
   (set! (.running (app-state)) true)
   (set! (.observer (app-state)) (presentation/observer-new))
   (set! (.draw-root (app-state)) draw-root)
@@ -146,7 +165,7 @@
   (assert (= (collect-frames) 0))
   (set! (.draw (app-state)) (cast (fnptr c [] i64) (nil)))
   (set! (.event (app-state)) (cast (fnptr c [i64 i64 f64 f64] i64) (nil)))
-  0)
+  0))
 
 ;;; The live boundary uses C scalars and callback pointers. Paper's concrete
 ;;; records and renderer storage stay in this one native host instance.
@@ -156,7 +175,8 @@
   (caption (rect x y w h) size ink font text))
 (defn button-native [(id i64) (x f64) (y f64) (w f64) (h f64) (text (ptr i8)) (selected bool) (pigment u32)] (-> i64)
   (button id (rect x y w h) text selected (cotton pigment)))
-(export-c [run! :as "lpc_paper_run"]
+(export-c [run! :as "lpc_paper_run"] [run-routed! :as "lpc_paper_run_routed"]
   [host/paper_begin :as "lpc_paper_begin"] [host/paper_redraw :as "lpc_paper_redraw"]
+  [host/paper_tick_interval :as "lpc_paper_tick_interval"]
   [panel-native :as "lpc_paper_panel"] [caption-native :as "lpc_paper_caption"]
   [button-native :as "lpc_paper_button"] [host/number :as "lpc_paper_number"])

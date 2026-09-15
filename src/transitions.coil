@@ -56,7 +56,5 @@
                 current (certificates record) at (certificate-index current field)
                 next (records/replace current (if (< at 0) (p/code-count current) at) certificate)]
             (store! state (policy/with-state (load state)
-              (records/replace schemas index `(~(p/code-nth record 0) ~(p/code-nth record 1)
-                ~(p/code-nth record 2) ~(p/code-nth record 3) ~(p/code-nth record 4)
-                ~(p/code-nth record 5) ~(p/code-nth record 6) ~next))
+              (records/replace schemas index (records/replace record 7 next))
               (policy/roots (load state)))))) 0))))

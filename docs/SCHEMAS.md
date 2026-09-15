@@ -1,6 +1,6 @@
 # Persistent state and field transitions
 
-Managed records opt in explicitly. Plain Coil records retain their ordinary behavior.
+Managed records opt in explicitly. Plain Coil records retain their ordinary behavior. Managed schemas own the lifetime of generated physical types; an authored `:jit/retain` option is rejected.
 
 ```coil
 (defstruct State :live/state true
@@ -42,4 +42,4 @@ The current native tests cover stable roots, repeated initializers, added/reorde
 
 ## Work still in progress
 
-Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Nested ownership policies, managed sums, generic schemas, schema metadata retirement, explicit state reset and the moving Paper acceptance scenario are not complete. The complete contract remains in [PLAN.md](PLAN.md).
+Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Nested ownership policies, managed sums, generic schemas and explicit state reset are not complete. Versioned compiler roots now retire obsolete schema metadata and native generations; the 1,000-edit durability gate passes. The moving Paper scenario has passed radius/default/retype/repair checks, including independent input domains; visible migration-failure injection remains outstanding. The complete contract remains in [PLAN.md](PLAN.md).

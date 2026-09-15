@@ -4,7 +4,7 @@ A native live-programming session with a real Paper window. Concrete function bo
 
 ## Build and run
 
-Requires macOS, the Paper integration worktree at `../paper-test/.worktrees/live-poc`, and Coil at `428e44f` from branch `live-poc-jit-project`. The compiler is installed globally on the development machine. `Coil.toml` declares the Paper dependency and native frameworks.
+Requires macOS, the Paper integration worktree at `../paper-test/.worktrees/live-poc`, and Coil at `ad32d18` from branch `live-poc-jit-project`. The compiler is installed globally on the development machine. `Coil.toml` declares the Paper dependency and native frameworks.
 
 ```sh
 coil build src/main.coil -o build/live-poc
@@ -54,6 +54,7 @@ python3 scripts/test_protocol.py  # fresh running headless host
 python3 scripts/test_repair_protocol.py
 python3 scripts/test_async_protocol.py
 python3 scripts/test_schema_protocol.py
+python3 scripts/test_schema_retention.py  # builds its own 1,000-edit native probe
 emacs --batch -Q --eval '(progn (require (quote package)) (package-initialize))' \
   -L editor/emacs -l coil-live-test -f ert-run-tests-batch-and-exit
 python3 scripts/benchmark.py --count 1000 --warmup 20 \
@@ -62,10 +63,12 @@ python3 scripts/benchmark.py --count 1000 --warmup 20 \
 
 The latest 1,000-edit color run passed with median 44.9 ms, p99 52.8 ms and maximum 53.1 ms; zero misses including clock uncertainty. Every frame reported the app active and window visible. The measured Paper render was 1280 × 960 at scale 2 with a 16.67 ms frame duration. [Raw measurements and limits](docs/measurements/README.md) include Python and actual unsaved Emacs runs.
 
-Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 56 passing tests, all four protocol scripts pass, and three Emacs integration tests pass.
+Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 62 passing tests, all four protocol scripts pass, and three Emacs integration tests pass.
+
+The moving fixture is selected with `LPC_FIXTURE=fixtures/moving.coil`. Its radius edit, added field, bool-to-sum migration, and one-form draw repair have been exercised in the visible Paper window. [Walkthrough](docs/MOVING_PAPER.md).
 
 ## Remaining scope
 
-This implementation is in progress. Ordinary persistent records, typed field transitions and transition-only deferred repair work; see [schema contracts](docs/SCHEMAS.md). Broader value policies, metadata retirement, output streaming, watcher integration, automated pixel comparison and broader retention/failure gates remain. Direct semantic repair and input cancellation work; unanalysed calls use conservative admission, and expressions are rejected while any function is blocked. Live generic and attributed function definitions receive capability diagnostics; use `defn*` for static helpers. Arbitrary native-stack continuation repair is outside the design.
+This implementation is in progress. Ordinary persistent records, typed field transitions and transition-only deferred repair work; see [schema contracts](docs/SCHEMAS.md). Broader value policies, output streaming, watcher integration, automated pixel comparison and broader retention/failure gates remain. Direct semantic repair and input cancellation work; unanalysed calls use conservative admission, and expressions are rejected while any function is blocked. Live generic and attributed function definitions receive capability diagnostics; use `defn*` for static helpers. Arbitrary native-stack continuation repair is outside the design.
 
 See [the complete plan](docs/PLAN.md) and project notebook `live-poc-coil` for contracts, measurements and external bugs.

@@ -1,0 +1,86 @@
+[
+  {
+    "id": "client-39d301cf898c40e2913ad73d8f1a811a-1",
+    "session": "application",
+    "revision": "2",
+    "diagnostic": "error: function 'moving-demo.tick': body has type bool but the declared return type is i64\n  --> <jit>:2:33\n  |\n2 | (defn tick [(now f64)] (-> i64) true)\n  |                                 ^^^^\n",
+    "status": [
+      "blocked",
+      "done"
+    ]
+  },
+  {
+    "id": "client-c9b970774e204da0b244a1fd403ad991-1",
+    "session": "application",
+    "compiler-queued": "0",
+    "revision": "2",
+    "schema-epoch": "1",
+    "state-phase": "0",
+    "state-condition": "0",
+    "now": "3054997.526634167",
+    "queued-input": "3",
+    "completed-input": "608",
+    "cancelled-input": "0",
+    "rejected-input": "0",
+    "coalesced-input": "1520",
+    "first-input-ticket": "606",
+    "pending-input": {
+      "606": {
+        "domain": "1",
+        "root": "5",
+        "condition": "5",
+        "opaque": "0"
+      },
+      "608": {
+        "domain": "1",
+        "root": "6",
+        "condition": "0",
+        "opaque": "0"
+      },
+      "609": {
+        "domain": "1",
+        "root": "5",
+        "condition": "5",
+        "opaque": "0"
+      }
+    },
+    "status": [
+      "done"
+    ]
+  },
+  {
+    "id": "client-c9b970774e204da0b244a1fd403ad991-2",
+    "session": "application",
+    "revision": "3",
+    "ns": "moving-demo",
+    "status": [
+      "done"
+    ]
+  },
+  {
+    "code": "(.clicks world)",
+    "reply": {
+      "id": "client-c9b970774e204da0b244a1fd403ad991-3",
+      "session": "application",
+      "revision": "4",
+      "ns": "moving-demo",
+      "value": "1",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.clicks controls)",
+    "reply": {
+      "id": "client-c9b970774e204da0b244a1fd403ad991-4",
+      "session": "application",
+      "revision": "5",
+      "ns": "moving-demo",
+      "value": "1",
+      "status": [
+        "done"
+      ]
+    }
+  }
+]

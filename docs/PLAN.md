@@ -8,11 +8,13 @@ Build the session in `live-poc-coil`. Use `paper-test` as the real application d
 
 ## Current checkpoint — September 15, 2026
 
-Native immutable views, typed stable function handles, semantic blocked-entry repair, desired/accepted source tracking, typed expression results, owned pending input, and the real Paper host are implemented. The latest archived Python run presented all 1,000 measured color edits: median 45.19 ms, p99 53.33 ms, maximum 71.76 ms, zero misses. Every sample recorded an active, visible 1280 × 960 Paper window. See `docs/measurements/README.md` for raw records and measurement limits.
+Native immutable views, typed function gates, semantic repair, desired/accepted source, typed expression results, asynchronous compilation and the real Paper host are implemented. Ordinary persistent records support generated defaults, typed field transitions, deferred schema repair and selective state admission. Versioned compiler roots and a reclaiming session allocator bound schema/native retention.
 
-The actual Emacs unsaved-buffer path also completed 1,000 measured edits. Its wall-clock limitations and telemetry recovery are documented with the archive. Visual inspection proved that a click queued behind a blocked callback runs once after repair, with state preserved.
+The archived 1,000-edit color run has median 44.907 ms, p99 52.775 ms and maximum 53.138 ms, with zero misses. That run predates the latest schema and input-domain changes; the visible latency gate must be rerun. The separate 1,000-schema-edit durability gate passes at 703 MB peak RSS, four native generations and flat live session allocation bytes.
 
-A dedicated compiler worker and responsive socket control lane are being validated. Thirty-three native tests and real socket tests cover cooperative interruption, queued cancellation, source inspection, framing, idempotent retries, and disconnected response ownership. This checkpoint does not complete the design: managed schema migration, file synchronization, streamed output, exact fresh-render pixel comparison, and broader durability gates remain outstanding.
+The moving Paper fixture has passed radius edits, an added defaulted field, bool-to-sum migration, blocked drawing and one-form repair. A separate visible test proved independent control progress while scene input remained ordered behind a blocked tick. All 62 native tests pass. The four socket suites and prior Emacs checks cover separate protocol/editor contracts; see the raw reports and `MOVING_PAPER.md` for their limits.
+
+The complete design is still in progress: explicit reset, broader managed value/ownership policies, ABI lineage, file synchronization, streamed output, completion, exact fresh-render pixel comparison and remaining durability/latency workloads are outstanding.
 
 The sections below specify the complete intended implementation and its remaining acceptance gates.
 

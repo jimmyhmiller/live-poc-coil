@@ -1,4 +1,6 @@
 (module live-poc-coil.semantic)
+(import "live-poc-coil.native-contracts" :as native-contracts)
+(import "live-poc-coil.purity" :as purity)
 (import "coil.primitive" :as p)
 (import "live-poc-coil.policy-state" :as policy)
 (import "live-poc-coil.syntax-state" :as syntax)
@@ -100,7 +102,7 @@
   (when (p/code-list? form)
     (for [i 0 (p/code-count form)] (state-dependencies! (p/code-nth form i) out))) 0)
 (defn dependencies! [(form Code) (registry Code) (out CodeBuilder)] (-> bool)
-  (let [decl (p/code-decl form) (mut known) (state-borrow? form) (mut opaque) false]
+  (let [decl (p/code-decl form) (mut known) (or (state-borrow? form) (native-contracts/leaf? decl)) (mut opaque) false]
     (when (declaration? decl)
       (for [i 0 (p/code-count registry)]
         (let [item (p/code-nth registry i)]
@@ -120,7 +122,8 @@
     (when (and (p/code-list? form) (and (not (p/code-vector? form)) (> (p/code-count form) 0)))
       (let [head (p/code-nth form 0)]
         (when (and (not (declaration? decl))
-                   (and (not (syntax-head? head)) (not (p/code-eq (p/type-of form) `:unknown))))
+                   (and (not (or (syntax-head? head) (purity/arithmetic? form)))
+                        (not (p/code-eq (p/type-of form) `:unknown))))
           (set! opaque true))))
     (when (or (p/code-list? form) (p/code-vector? form))
       (for [i (if (state-borrow? form) 1 0) (p/code-count form)]

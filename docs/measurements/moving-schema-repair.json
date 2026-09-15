@@ -1,0 +1,162 @@
+[
+  {
+    "code": "(.x world)",
+    "reply": {
+      "id": "client-a9bda32af1854eefbd1aedce49b224df-1",
+      "session": "application",
+      "revision": "2",
+      "ns": "moving-demo",
+      "value": "311.17864",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(defn radius [] (-> f64) 40.0)",
+    "reply": {
+      "id": "client-a9bda32af1854eefbd1aedce49b224df-2",
+      "session": "application",
+      "revision": "3",
+      "ns": "moving-demo",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.x world)",
+    "reply": {
+      "id": "client-a9bda32af1854eefbd1aedce49b224df-3",
+      "session": "application",
+      "revision": "4",
+      "ns": "moving-demo",
+      "value": "329.845823",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(defstruct State :live/state true [(x f64 150.0) (velocity f64 70.0) (last f64 0.0) (visible bool true) (clicks i64 0) (mass f64 2.0)])",
+    "reply": {
+      "id": "client-a9bda32af1854eefbd1aedce49b224df-4",
+      "session": "application",
+      "revision": "5",
+      "ns": "moving-demo",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.mass world)",
+    "reply": {
+      "id": "client-a9bda32af1854eefbd1aedce49b224df-5",
+      "session": "application",
+      "revision": "6",
+      "ns": "moving-demo",
+      "value": "2.0",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.x world)",
+    "reply": {
+      "id": "client-a9bda32af1854eefbd1aedce49b224df-6",
+      "session": "application",
+      "revision": "7",
+      "ns": "moving-demo",
+      "value": "357.846013",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(defsum Visibility (Hidden) (Visible))\n(defstruct State :live/state true [(x f64 150.0) (velocity f64 70.0) (last f64 0.0) (visible Visibility (Visible)) (clicks i64 0) (mass f64 2.0)])\n(migrate State visible old (if old (Visible) (Hidden)))",
+    "reply": {
+      "id": "client-679d04ffe4d34c88ab9dac54c21ec42c-1",
+      "session": "application",
+      "revision": "8",
+      "diagnostic": "error: function 'moving-demo.visible?': body has type moving-demo.Visibility but the declared return type is bool\n   --> <jit>:10:29\n   |\n10 | (defn visible? [] (-> bool) (.visible world))\n   |                             ^^^^^^^^^^^^^^^^\n",
+      "status": [
+        "blocked",
+        "done"
+      ]
+    }
+  },
+  {
+    "status": {
+      "id": "client-679d04ffe4d34c88ab9dac54c21ec42c-2",
+      "session": "application",
+      "compiler-queued": "0",
+      "revision": "8",
+      "schema-epoch": "3",
+      "state-phase": "0",
+      "state-condition": "0",
+      "now": "3053823.234393876",
+      "queued-input": "1",
+      "completed-input": "4759",
+      "cancelled-input": "0",
+      "rejected-input": "0",
+      "coalesced-input": "6",
+      "first-input-ticket": "4760",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.clicks world)",
+    "reply": {
+      "id": "client-116b1a12c2544b40b33c618a590682f0-1",
+      "session": "application",
+      "err": "expression admission while functions are blocked requires dependency coverage",
+      "status": [
+        "error",
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(defn visible? [] (-> bool) (match (.visible world) (Hidden [] false) (Visible [] true)))",
+    "reply": {
+      "id": "client-116b1a12c2544b40b33c618a590682f0-2",
+      "session": "application",
+      "revision": "9",
+      "ns": "moving-demo",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.clicks world)",
+    "reply": {
+      "id": "client-116b1a12c2544b40b33c618a590682f0-3",
+      "session": "application",
+      "revision": "10",
+      "ns": "moving-demo",
+      "value": "1",
+      "status": [
+        "done"
+      ]
+    }
+  },
+  {
+    "code": "(.mass world)",
+    "reply": {
+      "id": "client-116b1a12c2544b40b33c618a590682f0-4",
+      "session": "application",
+      "revision": "11",
+      "ns": "moving-demo",
+      "value": "2.0",
+      "status": [
+        "done"
+      ]
+    }
+  }
+]

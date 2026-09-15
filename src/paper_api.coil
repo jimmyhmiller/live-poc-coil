@@ -2,13 +2,25 @@
 ;;; into the retained compiler; callbacks remain pinned by the application host.
 (module live-poc-coil.paper-api)
 (import "live-poc-coil.function" :as function)
+(import "live-poc-coil.input-routes" :as routes)
+(import "coil.slice" :as slice)
 (extern run-native :as "lpc_paper_run" :cc c [i64 (fnptr c [] i64) i64 (fnptr c [i64 i64 f64 f64] i64)] (-> i64))
 (defn run [(draw (function/Function (fnptr c [] i64)))
            (event (function/Function (fnptr c [i64 i64 f64 f64] i64)))] (-> i64)
   (run-native (.id draw) (.gate draw) (.id event) (.gate event)))
 (extern begin :as "lpc_paper_begin" :cc c [u32] (-> i64))
 (extern redraw :as "lpc_paper_redraw" :cc c [] (-> i64))
+(extern tick-interval :as "lpc_paper_tick_interval" :cc c [f64] (-> i64))
 (extern panel :as "lpc_paper_panel" :cc c [f64 f64 f64 f64 f64 f64] (-> i64))
 (extern caption :as "lpc_paper_caption" :cc c [f64 f64 f64 f64 f64 u32 i64 (ptr i8)] (-> i64))
 (extern button :as "lpc_paper_button" :cc c [i64 f64 f64 f64 f64 (ptr i8) bool u32] (-> i64))
 (extern number :as "lpc_paper_number" :cc c [f64 f64 f64 u32 i64] (-> i64))
+
+;;; Routes are copied before the event loop starts. Domain zero is reserved for
+;;; the fallback handler; positive domains declare independent input ordering.
+(extern run-routed-native :as "lpc_paper_run_routed" :cc c
+  [i64 (fnptr c [] i64) i64 (fnptr c [i64 i64 f64 f64] i64) (ptr routes/Route) i64] (-> i64))
+(defn run-routed [(draw (function/Function (fnptr c [] i64)))
+  (event (function/Function (fnptr c [i64 i64 f64 f64] i64))) (table (slice routes/Route))] (-> i64)
+  (run-routed-native (.id draw) (.gate draw) (.id event) (.gate event)
+    (slice/slice-data table) (slice/slice-len table)))

@@ -12,6 +12,8 @@
   (assert (= (session/submit! "(module schema-demo) (read-value)") 0))
   (assert (= (.result (session/instance)) "42"))
   (let [root (graph/root (field (managed/state) heap) 1)]
+    (assert (!= (session/submit! "(module schema-demo) (defstruct State :live/state true :jit/retain true [(value i64 99)])") 0))
+    (assert (= (.version (.schema root)) 1))
     (assert (= (session/submit! "(module schema-demo) (letonce world (State :value 99))") 0))
     (assert (= (session/submit! "(module schema-demo) (read-value)") 0))
     (assert (= (.result (session/instance)) "42"))

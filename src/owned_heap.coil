@@ -1,0 +1,63 @@
+;;; Individually reclaimable allocations with a shared final lifetime. The
+;;; compiler lane serializes access. Unlike request scratch, deallocate releases
+;;; backing storage immediately; close releases only still-owned allocations.
+(module live-poc-coil.owned-heap)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(defstruct Block [(previous (ptr Block)) (next (ptr Block)) (owner (ptr Heap))
+  (request a/AllocRequest) (backing a/AllocRequest) (offset i64)])
+(defstruct Heap [(parent (dyn a/Allocator)) (head (ptr Block))
+  (live-blocks i64) (live-bytes i64) (peak-bytes i64) (closed bool)])
+(defn init! [(heap (ptr Heap)) (parent (dyn a/Allocator))] (-> i64)
+  (store! heap (Heap :parent parent :head (p/cast (ptr Block) 0)
+    :live-blocks 0 :live-bytes 0 :peak-bytes 0 :closed false)) 0)
+(defn allocate! [(heap (ptr Heap)) (request (ref a/AllocRequest))] (-> (Option (ptr i8)))
+  (block :done
+    (when (or (.closed heap) (not (a/valid-request? request))) (break :done (None)))
+    (let [alignment (if (> (.align request) (p/alignof Block)) (.align request) (p/alignof Block))
+          prefix (+ (p/sizeof Block) (p/sizeof (ptr Block))) maximum 9223372036854775807]
+      (when (> alignment (- maximum prefix)) (break :done (None)))
+      (let [offset (& (+ prefix (- alignment 1)) (- 0 alignment))]
+        (when (> (.bytes request) (- maximum offset)) (break :done (None)))
+        (let [total (+ offset (.bytes request))
+              backing (a/AllocRequest :type-id 0 :count total :bytes total :align alignment)]
+          (when (> total (- maximum (.live-bytes heap))) (break :done (None)))
+          (match (a/raw-alloc (.parent heap) backing)
+            (None [] (None))
+            (Some [base]
+              (let [block (p/cast (ptr Block) base) payload (p/index base offset)]
+                (store! block (Block :previous (p/cast (ptr Block) 0) :next (.head heap)
+                  :owner heap :request request :backing backing :offset offset))
+                (unless (= (p/cast i64 (.head heap)) 0) (set! (.previous (.head heap)) block) 0)
+                (set! (.head heap) block)
+                (store! (p/cast (ptr (ptr Block)) (p/index payload (- 0 (p/sizeof (ptr Block))))) block)
+                (set! (.live-blocks heap) (+ (.live-blocks heap) 1))
+                (set! (.live-bytes heap) (+ (.live-bytes heap) total))
+                (when (> (.live-bytes heap) (.peak-bytes heap)) (set! (.peak-bytes heap) (.live-bytes heap)))
+                (Some payload)))))))))
+(defn release-block! [(heap (ptr Heap)) (block (ptr Block))] (-> i64)
+  (assert (= (.owner block) heap))
+  (let [before (.previous block) after (.next block) backing (.backing block)]
+    (if (= (p/cast i64 before) 0) (set! (.head heap) after) (set! (.next before) after))
+    (unless (= (p/cast i64 after) 0) (set! (.previous after) before) 0)
+    (set! (.live-blocks heap) (- (.live-blocks heap) 1))
+    (set! (.live-bytes heap) (- (.live-bytes heap) (.bytes backing)))
+    (a/raw-free (.parent heap) (p/cast (ptr i8) block) backing)) 0)
+(impl a/Allocator Heap
+  (allocate [(self (ptr Heap)) (request (ref a/AllocRequest))] (-> (Option (ptr i8)))
+    (allocate! self request))
+  (resize [(self (ptr Heap)) (memory (ptr i8)) (old (ref a/AllocRequest)) (next (ref a/AllocRequest))] (-> bool) false)
+  (remap [(self (ptr Heap)) (memory (ptr i8)) (old (ref a/AllocRequest)) (next (ref a/AllocRequest))] (-> (Option (ptr i8))) (None))
+  (deallocate [(self (ptr Heap)) (memory (ptr i8)) (request (ref a/AllocRequest))] (-> i64)
+    (assert (not (.closed self)))
+    (unless (= (p/cast i64 memory) 0)
+      (let [block (load (p/cast (ptr (ptr Block)) (p/index memory (- 0 (p/sizeof (ptr Block))))))]
+        (assert (= (.bytes (.request block)) (.bytes request)))
+        (assert (= (.align (.request block)) (.align request)))
+        (release-block! self block)) 0) 0))
+(defn allocator [(heap (ptr Heap))] (-> (dyn a/Allocator)) (p/make-dyn a/Allocator heap))
+(defn close! [(heap (ptr Heap))] (-> i64)
+  (unless (.closed heap)
+    (loop (if (= (p/cast i64 (.head heap)) 0) (break) (release-block! heap (.head heap))))
+    (set! (.closed heap) true))
+  (assert (= (.live-blocks heap) 0)) (assert (= (.live-bytes heap) 0)) 0)

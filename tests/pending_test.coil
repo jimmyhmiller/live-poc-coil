@@ -78,3 +78,35 @@
     (assert (= (pending/cancel! queue 0) -1))
     (pending/close! queue) (pending/destroy! queue)
     (assert (rt/close! runtime)) (rt/collect-views! runtime) (rt/destroy! runtime)))
+
+(deftest explicit-input-domains-bypass-blocked-work-without-reordering-peers
+  (let [runtime (p/alloc-stack rt/Runtime) queue (p/alloc-stack pending/Queue)
+        counts (p/alloc-stack Counts)]
+    (store! counts (p/zeroed Counts))
+    (rt/init! runtime) (pending/init! queue 4)
+    (let [view (rt/clone-current! runtime)]
+      (rt/block! view 0 1)
+      (rt/stage! view 1 (p/cast (ptr i8) (p/fnptr-of target)))
+      (rt/publish! runtime view))
+    (assert (= (pending/enqueue-domain! queue 1 0 0 (payload counts 1) (p/fnptr-of run) (p/fnptr-of drop)) 1))
+    ; A ready root still waits behind its blocked ordering-domain peer.
+    (assert (= (pending/enqueue-domain! queue 1 0 1 (payload counts 2) (p/fnptr-of run) (p/fnptr-of drop)) 2))
+    (assert (= (pending/enqueue-domain! queue 2 0 1 (payload counts 3) (p/fnptr-of run) (p/fnptr-of drop)) 3))
+    (assert (= (pending/pump-one! queue runtime) 3))
+    (assert (= (.order counts) 3)) (assert (= (.dropped counts) 1))
+    (assert (= (pending/pump-one! queue runtime) 0))
+    (let [view (rt/clone-current! runtime)]
+      (rt/stage! view 0 (p/cast (ptr i8) (p/fnptr-of target)))
+      (rt/publish! runtime view))
+    (assert (= (pending/pump-one! queue runtime) 1))
+    (assert (= (pending/pump-one! queue runtime) 2))
+    (assert (= (.order counts) 312)) (assert (= (.dropped counts) 3))
+    ; Identical coalescing keys in separate domains own separate payloads.
+    (assert (= (pending/enqueue-domain! queue 1 6 1 (payload counts 4) (p/fnptr-of run) (p/fnptr-of drop)) 4))
+    (assert (= (pending/enqueue-domain! queue 2 6 1 (payload counts 5) (p/fnptr-of run) (p/fnptr-of drop)) 5))
+    (assert (= (.coalesced queue) 0))
+    (assert (= (pending/cancel! queue 4) 0))
+    (assert (= (pending/close! queue) 0))
+    (assert (= (.dropped counts) 5))
+    (pending/destroy! queue)
+    (assert (rt/close! runtime)) (rt/collect-views! runtime) (rt/destroy! runtime)))
