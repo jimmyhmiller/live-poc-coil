@@ -1,0 +1,148 @@
+(module live-poc-coil.server)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.slice" :as slice)
+(import "coil.socket" :as socket)
+(import "coil.selectors" :as select)
+(import "coil.scratch" :as scratch)
+(import "coil.time" :as time)
+(import "coil.str" :as str)
+(import "coil.result" :use *)
+(import "live-poc-coil.bencode" :as b)
+(import "live-poc-coil.protocol" :as protocol)
+(import "live-poc-coil.metrics" :as metrics)
+(cimport "fcntl.h" :use [fcntl open O_NONBLOCK F_GETFL F_SETFL O_WRONLY O_CREAT O_TRUNC O_NOFOLLOW])
+(cimport "sys/stat.h" :use [fchmod])
+(extern write :cc c [i32 (ptr i8) u64] (-> i64))
+(extern close :cc c [i32] (-> i32))
+(extern memmove :cc c [(ptr i8) (ptr i8) u64] (-> (ptr i8)))
+(extern snprintf :cc c [(ptr i8) u64 (ptr i8) ...] (-> i32))
+(extern printf :cc c [(ptr i8) ...] (-> i32))
+(extern fflush :cc c [(ptr i8)] (-> i32))
+
+(const CAPACITY 65536)
+(defstruct Client [(connection socket/TcpConnection) (active bool)
+  (input (slice u8)) (used i64) (output (slice u8)) (sent i64)
+  (arena scratch/ScratchArena) (touched f64)])
+(defstruct Server [(listener socket/TcpListener) (clients (array Client 32)) (port i64)])
+(defn state [] (-> (ptr Server)) (p/alloc-static Server))
+(defn nonblocking! [(fd i32)] (-> bool)
+  (let [flags (fcntl fd F_GETFL)]
+    (and (>= flags 0) (= (fcntl fd F_SETFL (| flags O_NONBLOCK)) 0))))
+(defn write-discovery [(path (ptr i8)) (text (slice u8))] (-> i64)
+  (let [fd (open path (p/cast i32 (| O_WRONLY (| O_CREAT (| O_TRUNC O_NOFOLLOW)))) (p/cast u32 384))]
+    (if (< fd 0) -1
+      (let [secure (fchmod fd (p/cast u16 384))
+            written (if (= secure 0) (write fd (p/cast (ptr i8) (slice/slice-data text))
+                                      (p/cast u64 (slice/slice-len text))) -1)
+            closed (close fd)]
+        (if (and (= written (slice/slice-len text)) (= closed 0)) 0 -1)))))
+(defn init! [] (-> i64)
+  (let [s (state)]
+    (store! s (p/zeroed Server))
+    (match (socket/tcp-listen (a/malloc-allocator) (field s listener) "127.0.0.1" 0 true 32)
+      (Err [e] (socket/socket-error-code e))
+      (Ok [_]
+        (match (socket/tcp-listener-port (field s listener))
+          (Err [e] (socket/socket-error-code e))
+          (Ok [port]
+            (let [buffer (p/alloc-stack (array i8 32))]
+              (set! (.port s) port)
+              (assert (nonblocking! (.fd (field s listener))))
+              (snprintf (p/cast (ptr i8) buffer) 32 c"%lld\n" port)
+              (assert (= (write-discovery c".nrepl-port" (str/cstr->str (p/cast (ptr i8) buffer))) 0))
+              (assert (= (write-discovery c".live-token" (.token (protocol/state))) 0))
+              (printf c"PORT=%lld\n" port)
+              (fflush (p/cast (ptr i8) 0))
+              0)))))))
+(defn close-client! [(c (ptr Client))] (-> i64)
+  (when (.active c)
+    (socket/tcp-connection-close! (field c connection))
+    (a/free (a/malloc-allocator) (.input c))
+    (scratch/scratch-close! (field c arena))
+    (set! (.active c) false))
+  0)
+(defn accept! [] (-> i64)
+  (let [s (state) connection (p/alloc-stack socket/TcpConnection) (mut slot) -1]
+    (for [i 0 32] (when (and (< (load slot) 0) (not (.active (p/index (field s clients) i)))) (set! slot i)))
+    (match (socket/tcp-accept (field s listener) connection)
+      (Err [_] -1)
+      (Ok [_]
+        (if (< (load slot) 0) (socket/tcp-connection-close! connection)
+          (let [c (p/index (field s clients) (load slot))]
+            (store! c (p/zeroed Client))
+            (set! (.connection c) (load connection))
+            (if (not (nonblocking! (.fd connection))) (socket/tcp-connection-close! connection)
+              (match (a/alloc [u8] (a/malloc-allocator) CAPACITY)
+                (None [] (socket/tcp-connection-close! connection))
+                (Some [bytes]
+                  (set! (.input c) bytes)
+                  (set! (.active c) true)
+                  (set! (.touched c) (metrics/now))
+                  (scratch/scratch-init (field c arena) (a/malloc-allocator))
+                  0)))))))))
+(defn process-buffer! [(c (ptr Client))] (-> i64)
+  (when (and (.active c) (= (.sent c) (slice/slice-len (.output c))))
+    (let [request (p/alloc-stack b/Request)
+          consumed (b/bdecode-request (slice/slice-new (slice/slice-data (.input c)) (.used c)) request)]
+      (cond (< consumed 0) (close-client! c)
+        (> consumed 0)
+          (do
+            (scratch/scratch-reset! (field c arena))
+            (set! (.output c) (protocol/dispatch-request (scratch/scratch-allocator (field c arena)) request))
+            (set! (.sent c) 0)
+            (set! (.used c) (- (.used c) consumed))
+            (memmove (p/cast (ptr i8) (slice/slice-data (.input c)))
+              (p/cast (ptr i8) (p/index (slice/slice-data (.input c)) consumed)) (p/cast u64 (.used c)))
+            0)
+        (= (.used c) CAPACITY) (close-client! c)
+        true 0)))
+  0)
+(defn read-client! [(c (ptr Client))] (-> i64)
+  (match (socket/tcp-read (field c connection)
+           (p/cast (ptr i8) (p/index (slice/slice-data (.input c)) (.used c))) (- CAPACITY (.used c)))
+    (Err [e] (let [n (socket/socket-error-code e)]
+               (unless (or (= n 35) (or (= n 11) (= n 4))) (close-client! c)) 0))
+    (Ok [n] (if (= n 0) (close-client! c)
+      (do (set! (.used c) (+ (.used c) n)) (set! (.touched c) (metrics/now)) 0)))))
+(defn write-client! [(c (ptr Client))] (-> i64)
+  (match (socket/tcp-write (field c connection)
+           (p/cast (ptr i8) (p/index (slice/slice-data (.output c)) (.sent c)))
+           (- (slice/slice-len (.output c)) (.sent c)))
+    (Err [e] (let [n (socket/socket-error-code e)]
+               (unless (or (= n 35) (or (= n 11) (= n 4))) (close-client! c)) 0))
+    (Ok [n] (if (= n 0) (close-client! c)
+      (do (set! (.sent c) (+ (.sent c) n)) (set! (.touched c) (metrics/now)) 0)))))
+(defn serve! [] (-> i64)
+  (let [s (state) watches (p/alloc-stack (array select/Watch 33))
+        (mut count) 0 (mut cursor) 0
+        duration (match (time/duration-millis 50) (Ok [d] d) (Err [_] (p/zeroed time/Duration)))]
+    (loop
+      (when (= (protocol/stopping) 1) (break))
+      (set! count 1)
+      (store! (p/index watches 0) (socket/tcp-listener-watch (field s listener) -1))
+      (for [j 0 32]
+        (let [i (% (+ j (load cursor)) 32) c (p/index (field s clients) i)]
+          (process-buffer! c)
+          (when (and (.active c) (> (- (metrics/now) (.touched c)) 30.0)) (close-client! c))
+          (when (.active c)
+            (store! (p/index watches (load count))
+              (socket/tcp-connection-watch (field c connection)
+                (if (< (.sent c) (slice/slice-len (.output c)))
+                  (select/interest-writable) (select/interest-readable)) i))
+            (set! count (+ (load count) 1)))))
+      (match (select/wait-many-for (a/malloc-allocator) (slice/slice-new (p/cast (ptr select/Watch) watches) (load count)) duration)
+        (Err [_] 0)
+        (Ok [selection]
+          (let [selected selection]
+          (if (= (.token selected) -1) (accept!)
+            (let [i (.token selected) c (p/index (field s clients) i)]
+              (set! cursor (% (+ i 1) 32))
+              (if (< (.sent c) (slice/slice-len (.output c))) (write-client! c) (read-client! c))))))))
+    ; Complete an already encoded shutdown reply without admitting new work.
+    (for [i 0 32]
+      (let [c (p/index (field s clients) i)]
+        (when (and (.active c) (< (.sent c) (slice/slice-len (.output c)))) (write-client! c))
+        (close-client! c)))
+    (socket/tcp-listener-close! (field s listener))))
+(defn worker [(unused (ptr i8))] (-> (ptr i8)) (serve!) (p/cast (ptr i8) 0))

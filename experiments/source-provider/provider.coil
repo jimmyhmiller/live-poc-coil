@@ -1,0 +1,53 @@
+;;; Compile this policy once as a retained source provider. Each invocation
+;;; returns only this submission's implementations and typed publication glue.
+(module live-poc-coil.provider)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.lower" :as meta)
+(defn head? [(form Code) (name Code)] (-> bool)
+  (and (p/code-list? form) (and (> (p/code-count form) 0) (p/code-eq (p/code-nth form 0) name))))
+(defn read-source [(context Code)] (-> Code)
+  (let [parsed (p/code-read (p/code-nth context 2) context)
+        forms (if (head? parsed `do) (p/code-rest parsed) parsed)
+        state (p/code-session-state `(() 0))
+        (mut registry) (p/code-nth state 0)
+        revision (+ (p/code-int (p/code-nth state 1)) 1)
+        modules (p/code-list-new)
+        (mut current) (p/code-list-new)
+        (mut have-module) false]
+    (for [i 0 (p/code-count forms)]
+      (let [f (p/code-nth forms i)]
+        (if (head? f `module)
+          (do
+            (when (load have-module) (p/code-list-push! modules (p/code-list-done (load current))) 0)
+            (set! current (p/code-list-new))
+            (p/code-list-push! (load current) (p/code-nth f 1))
+            (set! have-module true)
+            0)
+          (do
+            (unless (load have-module) (p/error "live submissions require an explicit module declaration") 0)
+            ; The host's source policy replaces the original opt-in transform.
+            (unless (and (head? f `import) (p/code-eq (p/code-nth f 1) `"live-poc-coil.meta"))
+              (p/code-list-push! (load current) f) 0)
+            0))))
+    (when (load have-module) (p/code-list-push! modules (p/code-list-done (load current))) 0)
+    (let [groups (p/code-list-done modules)
+          out (p/code-list-new)
+          calls (p/code-list-new)
+          entry (p/syntax->datum (p/code-symbol `__coil_session_entry "_s" `~revision))]
+      (when (= (p/code-count groups) 0) (p/error "empty live submission") 0)
+      (for [i 0 (p/code-count groups)]
+        (let [m (p/code-nth groups i)
+              module (p/code-nth m 0)
+              helper (p/syntax->datum (p/code-symbol `__lpc_stage "_s" `~revision "_m" `~i))
+              lowered (meta/lower `(~@m (defn* ~helper [] (-> i64) (live-poc-coil.meta/publish))) (mut registry) true)]
+          (p/code-list-push! out `(module ~module))
+          (for [j 1 (p/code-count lowered)]
+            (let [form (p/code-nth lowered j)]
+              (p/code-list-push! out
+                (if (and (meta/definition? form) (p/code-eq (p/code-nth form 1) helper))
+                  `(defn* ~helper :jit/retain false ~(p/code-nth form 2) ~(p/code-nth form 3) ~(p/code-nth form 4))
+                  form))))
+          (p/code-list-push! calls `(~(p/syntax->datum (p/code-symbol module "." helper))))))
+      (p/code-list-push! out `(defn* ~entry [] (-> i64) (do ~@(p/code-list-done calls) 0)))
+      (p/code-session-stage! `(~(load registry) ~revision))
+      `(do ~@(p/code-list-done out)))))

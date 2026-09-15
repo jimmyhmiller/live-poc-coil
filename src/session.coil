@@ -1,0 +1,205 @@
+(module live-poc-coil.session)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.jit" :as jit)
+(import "coil.scratch" :as scratch)
+(import "coil.sync" :as sync)
+(import "coil.result" :use *)
+(import "live-poc-coil.runtime" :as rt)
+(import "live-poc-coil.metrics" :as metrics)
+(import "live-poc-coil.source" :as source)
+(import "coil.atomic" :as atomic)
+(import "coil.str" :as str)
+(import "coil.slice" :as slice)
+(extern getenv :cc c [(ptr i8)] (-> (ptr i8)))
+
+;;; One application world per host process. Editor connections share this world.
+;;; The process owns this stable bridge for the complete native session lifetime.
+(defstruct Session
+  [(arena scratch/ScratchArena)
+   (compiler jit/JitSession)
+   (sources source/Ledger)
+   (runtime rt/Runtime)
+   (writer sync/Mutex)
+   (staging (ptr rt/View))
+   (evaluation (ptr i8))
+   (result (slice u8))
+   (result-overflow bool)
+   (initialized bool)])
+
+(defn instance [] (-> (ptr Session))
+  (p/alloc-static Session))
+
+(defn stage-native [(id i64) (address (ptr i8))] (-> i64)
+  (assert (!= (p/cast i64 (.staging (instance))) 0))
+  (rt/stage! (.staging (instance)) id address))
+
+(defn stage-evaluation [(address (fnptr c [] i64))] (-> i64)
+  (assert (!= (p/cast i64 (.staging (instance))) 0))
+  (assert (= (p/cast i64 (.evaluation (instance))) 0))
+  (set! (.evaluation (instance)) (p/cast (ptr i8) address))
+  0)
+(defn capture-result [(bytes (ptr i8)) (length i64) (overflow i64)] (-> i64)
+  (source/replace! (field (instance) result)
+    (slice/slice-new (p/cast (ptr u8) bytes) length))
+  (set! (.result-overflow (instance)) (!= overflow 0))
+  0)
+(export-c [stage-evaluation :as "lpc_stage_eval"] [capture-result :as "lpc_result"])
+
+(defn resolve-native [(id i64)] (-> (ptr i8))
+  (rt/resolve (field (instance) runtime) id))
+
+(defn published-epoch [] (-> (ptr i64)) (p/alloc-static i64))
+(defn current-revision [] (-> i64) (atomic/atomic-load (published-epoch)))
+(defn begin-native [] (-> i64)
+  (let [v (enter!)]
+    (if (= (p/cast i64 v) 0) -1
+      (do (metrics/draw! (.revision v)) (.revision v)))))
+(defn end-native [] (-> i64) (leave!))
+(export-c [begin-native :as "lpc_begin"] [end-native :as "lpc_end"]
+          [current-revision :as "lpc_revision"] [metrics/presented! :as "lpc_presented"])
+(export-c [stage-native :as "lpc_stage"] [resolve-native :as "lpc_resolve"])
+
+(defn init! [] (-> i64)
+  (let [s (instance)]
+    (assert (not (.initialized s)))
+    (assert (= (rt/init! (field s runtime)) 0))
+    (match (sync/mutex-init (field s writer))
+      (Ok [_] 0)
+      (Err [_] (a/oom-at c"writer mutex" 0)))
+    (scratch/scratch-init (field s arena) (a/malloc-allocator))
+    (let [toolchain (getenv c"LPC_TOOLCHAIN")]
+      (set! (.compiler s) (jit/jit-session-new-with-toolchain (scratch/scratch-allocator (field s arena))
+        (if (= (p/cast i64 toolchain) 0) "coil" (str/cstr->str toolchain)))))
+    (assert (= (jit/jit-session-load-project! (field s compiler)) 0))
+    (set! (.evaluation s) (p/cast (ptr i8) 0))
+    (set! (.result s) "")
+    (set! (.result-overflow s) false)
+    (source/init! (field s sources))
+    (metrics/init!)
+    (atomic/atomic-store (published-epoch) 0)
+    (set! (.initialized s) true)
+    0))
+
+(defn writer-lock! [] (-> i64)
+  (match (sync/mutex-lock! (field (instance) writer))
+    (Ok [n] n)
+    (Err [_] (a/oom-at c"writer lock" 0))))
+
+(defn writer-unlock! [] (-> i64)
+  (match (sync/mutex-unlock! (field (instance) writer))
+    (Ok [n] n)
+    (Err [_] (a/oom-at c"writer unlock" 0))))
+
+(defn collect! [] (-> i64)
+  (let [s (instance)
+        r (field s runtime)
+        (mut kept) 0]
+    (rt/collect-views! r)
+    (for [i 0 (al/al-len (.images r))]
+      (let [image (al/al-get (.images r) i)]
+        (if (= (.references image) 0)
+            (do
+              (assert (>= (jit/jit-generation-release-token! (field s compiler)
+                                                             (.token image))
+                          0))
+              (rt/free-one! image))
+            (do
+              (al/al-set! (field r images) (load kept) image)
+              (set! kept (+ (load kept) 1))
+              0))))
+    (set! (.len (field r images)) (load kept))
+    ; Close admission while proving quiescence and reclaiming retired mappings.
+    ; Running invocations never need the writer lane, so they can finish first.
+    (rt/lock! r)
+    (let [(mut quiet) true]
+      (for [i 0 (al/al-len (.views r))]
+        (when (> (.readers (al/al-get (.views r) i)) 0) (set! quiet false) 0))
+      (when (load quiet) (jit/jit-reclaim-retired! (field s compiler))))
+    (rt/unlock! r)
+    0))
+
+(defn submit! [(source (slice u8))] (-> i64)
+  (let [received (metrics/now)]
+    (writer-lock!)
+    (let [s (instance) r (field s runtime) candidate (rt/clone-current! r)
+          start (metrics/now) (mut status) 0
+          input-arena (p/alloc-stack scratch/ScratchArena)]
+      (scratch/scratch-init input-arena (a/malloc-allocator))
+      (source/replace! (field s result) "")
+      (set! (.result-overflow s) false)
+      (set! (.evaluation s) (p/cast (ptr i8) 0))
+      (source/begin! (field s sources) source)
+      (set! (.staging s) candidate)
+      (let [prepared (source/prepare (scratch/scratch-allocator input-arena) source)]
+        (if (!= (.diagnostic prepared) "")
+          (do (source/replace! (field (field s sources) diagnostic) (.diagnostic prepared))
+              (set! status 1) 0)
+          (do
+            (set! status (jit/jit-prepare-with-entry! (field s compiler) (.text prepared) "(live-poc-coil.meta/publish)"))
+            (when (!= (load status) 0)
+              (source/replace! (field (field s sources) diagnostic) (jit/jit-diagnostic (field s compiler))))
+            0)))
+      (when (= (load status) 0)
+        (set! status (jit/jit-publish-prepared! (field s compiler)))
+        (when (!= (load status) 0)
+          (source/replace! (field (field s sources) diagnostic) (jit/jit-diagnostic (field s compiler)))))
+      (source/finish! (field s sources) (load status)
+        (if (= (load status) 0) (.revision candidate) (current-revision))
+        (if (= (load status) 0) "" (.diagnostic (.sources s))))
+      (let [end (metrics/now)]
+        (if (= (load status) 0)
+          (let [token (jit/jit-generation-retain-current! (field s compiler))]
+            (assert (> token 0))
+            (rt/own-staged! r candidate token)
+            ; Install timing storage before the new view can be drawn.
+            (metrics/record! (.revision candidate) received start end (metrics/now))
+            (rt/publish! r candidate)
+            (atomic/atomic-store (published-epoch) (.revision candidate)))
+          (rt/drop-view! candidate)))
+      (when (and (= (load status) 0) (!= (p/cast i64 (.evaluation s)) 0))
+        (enter!)
+        (p/call-ptr (p/cast (fnptr c [] i64) (.evaluation s)))
+        (leave!))
+      (set! (.evaluation s) (p/cast (ptr i8) 0))
+      (set! (.staging s) (p/cast (ptr rt/View) 0))
+      ; The accepted native view is usable now. Compact its owned compiler
+      ; metadata while the main thread renders; keep the writer lane serialized.
+      (when (= (load status) 0)
+        (assert (= (jit/jit-finalize-published! (field s compiler)) 0))
+        (metrics/maintained! (.revision candidate)))
+      (scratch/scratch-close! input-arena)
+      (collect!)
+      (writer-unlock!)
+      (load status))))
+(defn diagnostic [] (-> (slice u8))
+  (.diagnostic (.sources (instance))))
+
+(defn enter! [] (-> (ptr rt/View))
+  (rt/enter! (field (instance) runtime)))
+
+(defn leave! [] (-> i64)
+  (rt/leave! (field (instance) runtime)))
+
+(defn address [(id i64)] (-> (ptr i8))
+  (resolve-native id))
+
+(defn close! [] (-> i64)
+  (writer-lock!)
+  (let [s (instance)
+        r (field s runtime)]
+    (if (not (rt/close! r))
+        (do (writer-unlock!) -1)
+        (do
+          (collect!)
+          (assert (= (jit/jit-generation-token-leases (field s compiler)) 0))
+          (assert (= (jit/jit-reset! (field s compiler)) 0))
+          (scratch/scratch-close! (field s arena))
+          (rt/destroy! r)
+          (metrics/destroy!)
+          (source/destroy! (field s sources))
+          (a/free (a/malloc-allocator) (.result s))
+          (set! (.initialized s) false)
+          (writer-unlock!)
+          (match (sync/mutex-destroy! (field s writer)) (Ok [n] n) (Err [_] -1))))))

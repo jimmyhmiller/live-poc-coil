@@ -1,0 +1,24 @@
+(module live-poc-coil.eval)
+(import "coil.primitive" :as p)
+(import "coil.io" :as io)
+(import "coil.fmt" :as fmt)
+(import "coil.result" :use *)
+(extern lpc_result :cc c [(ptr i8) i64 i64] (-> i64))
+(extern lpc_stage_eval :cc c [(fnptr c [] i64)] (-> i64))
+
+(defstruct Sink [(buffer io/FixBuf) (overflow bool)])
+(defn write-result [(raw (ptr i8)) (bytes (ptr i8)) (length i64)] (-> (Result i64 io/IoError))
+  (let [sink (p/cast (ptr Sink) raw)]
+    (match (io/fb-write (p/cast (ptr i8) (field sink buffer)) bytes length)
+      (Ok [n] (Ok n))
+      (Err [error] (do (set! (.overflow sink) true) (Err error))))))
+
+;;; Results use the language's typed Debug formatter and bounded caller storage.
+;;; The expression is evaluated exactly once before entering this function.
+(defn capture [(T fmt/Debug)] [(value T)] (-> i64)
+  (let [bytes (p/alloc-stack (array i8 65536))
+        sink (p/alloc-stack Sink) writer (p/alloc-stack io/Writer)]
+    (store! sink (Sink :buffer (io/FixBuf :data (p/cast (ptr i8) bytes) :len 0 :cap 65536) :overflow false))
+    (store! writer (io/Writer :write-fn (p/fnptr-of write-result) :ctx (p/cast (ptr i8) sink)))
+    (fmt/fmt writer "{:?}" value)
+    (lpc_result (.data (.buffer sink)) (.len (.buffer sink)) (if (.overflow sink) 1 0))))

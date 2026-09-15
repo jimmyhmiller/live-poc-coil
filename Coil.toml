@@ -1,0 +1,16 @@
+[package]
+name = "live-poc-coil"
+entry = "src/main.coil"
+source-roots = ["src", "tests"]
+
+[dependencies]
+paper = { path = "../paper-test/.worktrees/live-poc/lib/paper" }
+
+[link]
+frameworks = ["AppKit", "QuartzCore", "CoreGraphics", "CoreText", "ImageIO", "CoreFoundation", "AVFoundation", "Metal"]
+libs = ["objc"]
+flags = ["-Wl,-export_dynamic"]
+
+[test]
+roots = ["tests"]
+suffixes = ["_test.coil"]

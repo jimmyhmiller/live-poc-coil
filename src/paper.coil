@@ -1,0 +1,122 @@
+(module live-poc-coil.paper)
+(import "coil.primitive" :as p)
+(import "coil.atomic" :as atomic)
+(import "paper.flow" :use *)
+(import "paper.platform" :as host)
+(import "paper.gpu" :as gpu)
+(import "paper.scene" :as scene)
+(import "paper.frame-clock" :as frame-clock)
+(import "paper.objc" :use *)
+(import "paper.ffi" :use *)
+(import "live-poc-coil.session" :as session)
+(import "live-poc-coil.metrics" :as metrics)
+(import "live-poc-coil.presentation" :as presentation)
+(import "live-poc-coil.protocol" :as protocol)
+(extern pthread_main_np :cc c [] (-> i32))
+(defstruct AppState [(served i64) (drawing i64) (running bool) (observer (ptr presentation/Observer))
+  (draw (fnptr c [] i64)) (event (fnptr c [i64 i64 f64 f64] i64))])
+(defn app-state [] (-> (ptr AppState)) (p/alloc-static AppState))
+(defn draw-trampoline [] (-> i64)
+  (assert (= (pthread_main_np) 1))
+  (if (not (.running (app-state))) 0
+  (let [revision (session/begin-native)]
+    (assert (>= revision 0))
+    (set! (.drawing (app-state)) revision)
+    (p/call-ptr (.draw (app-state)))
+    (session/leave!))))
+(defn event-trampoline [(kind i64) (id i64) (x f64) (y f64)] (-> i64)
+  (assert (= (pthread_main_np) 1))
+  (if (not (.running (app-state))) 0
+  (let [view (session/enter!)]
+    (assert (!= (p/cast i64 view) 0))
+    (let [result (p/call-ptr (.event (app-state)) kind id x y)]
+      (session/leave!) result))))
+(defstruct FrameSlot [(sample (ptr presentation/Sample)) (command (ptr i8)) (drawable (ptr i8))])
+(defstruct FramePool [(slots (array FrameSlot 64))])
+(defn frames [] (-> (ptr FramePool)) (p/alloc-static FramePool))
+(defn collect-frames [] (-> i64)
+  (let [(mut busy) 0]
+    (for [i 0 64]
+      (let [slot (index (field (frames) slots) i)]
+        (when (!= (.sample slot) (cast (ptr presentation/Sample) 0))
+          (let [status (msg i64 (.command slot) (sel c"status") [])]
+            (assert (!= status 5))
+            (if (= status 4)
+              (do
+                (release (.drawable slot))
+                (release (.command slot))
+                (presentation/sample-release! (.sample slot))
+                (set! slot (p/zeroed FrameSlot))
+                0)
+              (set! busy (+ (load busy) 1)))))))
+    (load busy)))
+(defn present-frame [(layer (ptr i8))] (-> bool)
+  (assert (= (pthread_main_np) 1))
+  (collect-frames)
+  (let [(mut free-slot) -1]
+    (for [i 0 64]
+      (when (and (< (load free-slot) 0) (= (.sample (index (field (frames) slots) i)) (cast (ptr presentation/Sample) 0)))
+        (set! free-slot i)))
+    (if (< (load free-slot) 0) false
+      (let [slot (index (field (frames) slots) (load free-slot))
+            sample (presentation/sample-new (.observer (app-state)) (.drawing (app-state)))
+            closure (p/alloc-stack presentation/Block)]
+        (set! (.frame sample)
+          (metrics/FrameContext
+            :active (msg bool (.app (host/host)) (sel c"isActive") [])
+            :visible (!= (p/iand (msg i64 (.window (host/host)) (sel c"occlusionState") []) 2) 0)
+            :width (.width (scene/scene)) :height (.height (scene/scene))
+            :scale (msg f64 (.window (host/host)) (sel c"backingScaleFactor") [])
+            :duration (.duration (frame-clock/clock))))
+        (presentation/init-block! closure sample)
+        (if (gpu/present-with-handler layer (cast (ptr i8) closure))
+          (do
+            (set! slot (FrameSlot :sample sample
+              :command (retain (.last-command (gpu/gpu)))
+              :drawable (retain (.last-drawable (gpu/gpu)))))
+            true)
+          (do (presentation/sample-release! sample) false))))))
+(defn before-frame [] (-> bool)
+  (assert (= (pthread_main_np) 1))
+  (collect-frames)
+  (when (protocol/stopping)
+    (msg i64 (.window (host/host)) (sel c"close") []))
+  (let [revision (session/current-revision)]
+    (when (or (> revision (.served (app-state))) (metrics/pending? revision))
+      (set! (.served (app-state)) revision)
+      (host/paper_redraw)))
+  true)
+(defn run! [(draw-callback (fnptr c [] i64)) (event-callback (fnptr c [i64 i64 f64 f64] i64))] (-> i64)
+  (assert (= (pthread_main_np) 1))
+  (set! (.running (app-state)) true)
+  (set! (.observer (app-state)) (presentation/observer-new))
+  (set! (.draw (app-state)) draw-callback)
+  (set! (.event (app-state)) event-callback)
+  (host/paper_configure c"Live Coil — Paper latency proof" 640.0 480.0)
+  (host/paper_frame_integration (fnptr-of before-frame) (fnptr-of present-frame))
+  (host/paper_run (fnptr-of draw-trampoline) (fnptr-of event-trampoline))
+  (set! (.running (app-state)) false)
+  (host/paper_clear_frame_integration)
+  ; Retire metrics access before session teardown. Copied native Blocks own
+  ; their contexts until Metal disposes them, including skipped tail frames.
+  ; They contain no JIT addresses and cannot access a retired metrics instance.
+  (presentation/observer-retire! (.observer (app-state)))
+  (set! (.observer (app-state)) (cast (ptr presentation/Observer) 0))
+  (gpu/synchronize)
+  (assert (= (collect-frames) 0))
+  (set! (.draw (app-state)) (cast (fnptr c [] i64) (nil)))
+  (set! (.event (app-state)) (cast (fnptr c [i64 i64 f64 f64] i64) (nil)))
+  0)
+
+;;; The live boundary uses C scalars and callback pointers. Paper's concrete
+;;; records and renderer storage stay in this one native host instance.
+(defn panel-native [(x f64) (y f64) (w f64) (h f64) (radius f64) (depth f64)] (-> i64)
+  (panel (rect x y w h) radius depth (cream)))
+(defn caption-native [(x f64) (y f64) (w f64) (h f64) (size f64) (ink u32) (font i64) (text (ptr i8))] (-> i64)
+  (caption (rect x y w h) size ink font text))
+(defn button-native [(id i64) (x f64) (y f64) (w f64) (h f64) (text (ptr i8)) (selected bool) (pigment u32)] (-> i64)
+  (button id (rect x y w h) text selected (cotton pigment)))
+(export-c [run! :as "lpc_paper_run"]
+  [host/paper_begin :as "lpc_paper_begin"] [host/paper_redraw :as "lpc_paper_redraw"]
+  [panel-native :as "lpc_paper_panel"] [caption-native :as "lpc_paper_caption"]
+  [button-native :as "lpc_paper_button"] [host/number :as "lpc_paper_number"])

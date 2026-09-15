@@ -1,0 +1,37 @@
+;;; coil-live-test.el --- Live host integration tests -*- lexical-binding: t; -*-
+(require 'ert)
+(require 'coil-live)
+
+(defun coil-live-test--await (predicate)
+  (let ((deadline (+ (float-time) 10)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    (should (funcall predicate))))
+
+(ert-deftest coil-live-unsaved-definition ()
+  (with-temp-buffer
+    (coil-mode)
+    (insert "(module live-demo)\n(defn f [] (-> i64) 202)\n")
+    (set-buffer-modified-p t)
+    (coil-live-connect)
+    (goto-char (point-max))
+    (coil-live-eval-defun)
+    (coil-live-test--await (lambda () coil-live-last-revision))
+    (should (buffer-modified-p))
+    (should-not buffer-file-name)
+    (let ((previous coil-live-last-revision))
+      (goto-char (point-min))
+      (search-forward "202")
+      (replace-match "203")
+      (coil-live-eval-defun)
+      (coil-live-test--await (lambda () (not (equal previous coil-live-last-revision)))))
+    (should (buffer-modified-p))))
+
+(ert-deftest coil-live-load-unsaved-buffer ()
+  (with-temp-buffer
+    (coil-mode)
+    (insert "(module live-demo)\n(defn f [] (-> i64) 204)\n")
+    (coil-live-connect)
+    (coil-live-load-buffer)
+    (coil-live-test--await (lambda () coil-live-last-revision))
+    (should-not buffer-file-name)))

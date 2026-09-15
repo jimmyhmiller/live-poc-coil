@@ -1,0 +1,145 @@
+(module live-poc-coil.session-test)
+(import "coil.primitive" :as p)
+(import "coil.jit" :as jit)
+(import "live-poc-coil.session" :as s)
+(import "live-poc-coil.runtime" :as rt)
+
+(defn value [(id i64)] (-> i64)
+  (p/call-ptr (p/cast (fnptr c [] i64) (s/address id))))
+
+(deftest replacement-pins-old-view
+         (assert (= (s/init!) 0))
+         (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn color [] (-> i64) 7) (defn draw [] (-> i64) (+ (color) 1))")
+                    0))
+         (let [old (s/enter!)]
+           (assert (= (.revision old) 1))
+           (assert (= (value 1) 8))
+           (assert (= (s/submit! "(module demo) (defn color [] (-> i64) 15)") 0))
+           (assert (= (value 1) 8))
+           (s/leave!))
+         (let [new (s/enter!)]
+           (assert (= (.revision new) 2))
+           (assert (= (value 1) 16))
+           (s/leave!))
+         (assert (= (s/close!) 0)))
+
+(deftest rejected-candidate-keeps-view
+         (assert (= (s/init!) 0))
+         (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 42)")
+                    0))
+         (assert (!= (s/submit! "(module demo) (defn f [] (-> i64) true)") 0))
+         (let [v (s/enter!)]
+           (assert (= (.revision v) 1))
+           (assert (= (value 0) 42))
+           (s/leave!))
+         (assert (!= (s/submit! "(module demo) (defn f [] (-> bool) true)") 0))
+         (let [v (s/enter!)]
+           (assert (= (.revision v) 1))
+           (assert (= (value 0) 42))
+           (s/leave!))
+         (assert (= (s/submit! "(module demo) (defn f [] (-> i64) 43)") 0))
+         (let [v (s/enter!)]
+           (assert (= (.revision v) 2))
+           (assert (= (value 0) 43))
+           (s/leave!))
+         (assert (= (s/close!) 0)))
+
+(deftest prepared-abort-has-no-application-effects
+         (assert (= (s/init!) 0))
+         (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 1)")
+                    0))
+         (let [compiler (field (s/instance) compiler)]
+           (assert (= (jit/jit-prepare-with-entry! compiler
+                                                   "(module demo) (defn f [] (-> i64) 2)"
+                                                   "(live-poc-coil.meta/publish)")
+                      0))
+           (assert (= (jit/jit-abort-prepared! compiler) 0)))
+         (let [v (s/enter!)]
+           (assert (= (.revision v) 1))
+           (assert (= (value 0) 1))
+           (s/leave!))
+         (assert (= (s/close!) 0)))
+
+(import "coil.atomic" :as atomic)
+(import "coil.thread" :as thread)
+(import "coil.sync" :as sync)
+(import "coil.result" :use *)
+(defstruct ConcurrentCall [(started sync/Event) (resume sync/Event) (before i64) (after i64)])
+(defn call-on-worker [(raw (ptr i8))] (-> (ptr i8))
+  (let [c (p/cast (ptr ConcurrentCall) raw) v (s/enter!)]
+    (set! (.before c) (value 1))
+    (sync/event-notify-all! (field c started))
+    (sync/event-wait! (field c resume) 0)
+    (set! (.after c) (value 1))
+    (s/leave!))
+  (p/cast (ptr i8) 0))
+(deftest concurrent-invocation-pins-view
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 10) (defn g [] (-> i64) (+ (f) (f)))") 0))
+  (let [c (p/alloc-stack ConcurrentCall) worker (p/alloc-stack thread/Thread)]
+    (store! c (p/zeroed ConcurrentCall))
+    (sync/event-init (field c started)) (sync/event-init (field c resume))
+    (assert (= (thread/thread-spawn worker (p/fnptr-of call-on-worker) (p/cast (ptr i8) c)) 0))
+    (sync/event-wait! (field c started) 0)
+    (assert (= (s/submit! "(module demo) (defn f [] (-> i64) 20)") 0))
+    (let [v (s/enter!)] (assert (= (value 1) 40)) (s/leave!))
+    (sync/event-notify-all! (field c resume))
+    (assert (= (thread/thread-join worker) 0))
+    (assert (= (.before c) 20)) (assert (= (.after c) 20))
+    (sync/event-destroy! (field c started)) (sync/event-destroy! (field c resume)))
+  (assert (= (s/close!) 0)))
+
+(deftest recursion-and-batch-publication
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn fact [(n i64)] (-> i64) (if (= n 0) 1 (* n (fact (- n 1))))) (defn result [] (-> i64) (fact 5))") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 120)) (s/leave!))
+  (assert (= (s/submit! "(module demo) (defn fact [(n i64)] (-> i64) (if (= n 0) 2 (* n (fact (- n 1))))) (defn result [] (-> i64) (+ (fact 5) 1))") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 241)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest close-refuses-live-readers
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 42)") 0))
+  (s/enter!)
+  (assert (= (s/close!) -1))
+  (assert (= (value 0) 42))
+  (s/leave!)
+  (assert (= (s/close!) 0)))
+
+(deftest paper-import-preserves-live-policy
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (import \"paper.flow\" :use *) (defn color [] (-> i64) 1)") 0))
+  (assert (= (s/submit! "(module demo) (defn color [] (-> i64) 2)") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 2)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(import "coil.alloc" :as a)
+(deftest stock-repl-policy-with-paper
+  (let [compiler (p/alloc-stack jit/JitSession)]
+    (set! compiler (jit/jit-session-new (a/malloc-allocator)))
+    (assert (= (jit/jit-session-load-project! compiler) 0))
+    (assert (= (jit/jit-compile-with-entry! compiler "(module demo) (import \"coil.repl\") (import \"paper.flow\" :use *) (defn color [] (-> i64) 1)" "(coil.repl/publish)") 0))
+    (assert (= (jit/jit-compile-with-entry! compiler "(module demo) (defn color [] (-> i64) 2)" "(coil.repl/publish)") 0))
+    (assert (= (jit/jit-reset! compiler) 0))))
+
+(deftest malformed-live-header-is-rejected
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 1)") 0))
+  (assert (!= (s/submit! "(module demo) (defn f [] (-> i64))") 0))
+  (assert (!= (s/submit! "(module demo) (defn f :inline true [] (-> i64) 2)") 0))
+  (assert (!= (s/submit! "(module demo) (defn f [T] [(x T)] (-> T) x)") 0))
+  (let [v (s/enter!)] (assert (= (.revision v) 1)) (assert (= (value 0) 1)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest typed-evaluation-runs-after-publication
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 21)") 0))
+  (assert (= (s/submit! "(module demo) (+ (f) (f))") 0))
+  (assert (= (.result (s/instance)) "42"))
+  (assert (= (s/submit! "(module demo) (defn f [] (-> i64) 30) (f)") 0))
+  (assert (= (.result (s/instance)) "30"))
+  (assert (= (s/submit! "(module demo) true") 0))
+  (assert (= (.result (s/instance)) "true"))
+  (assert (!= (s/submit! "(module demo) (+ true 1)") 0))
+  (assert (= (.result (s/instance)) ""))
+  (assert (= (s/close!) 0)))

@@ -1,0 +1,178 @@
+(module live-poc-coil.protocol)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.str" :as str)
+(import "coil.slice" :as slice)
+(import "coil.atomic" :as atomic)
+(import "live-poc-coil.bencode" :as b)
+(import "live-poc-coil.session" :as session)
+(import "live-poc-coil.metrics" :as metrics)
+(import "live-poc-coil.source" :as source)
+
+(extern snprintf :cc c [(ptr i8) u64 (ptr i8) ...] (-> i32))
+(extern arc4random_buf :cc c [(ptr i8) u64] (-> void))
+(defstruct Receipt [(id (slice u8)) (code (slice u8)) (ns (slice u8))
+  (base (slice u8)) (op (slice u8)) (response (slice u8))])
+(defstruct Protocol [(token (slice u8)) (receipts (al/ArrayList Receipt)) (stop i64)])
+(defn state [] (-> (ptr Protocol)) (p/alloc-static Protocol))
+(defn stopping [] (-> i64) (atomic/atomic-load (field (state) stop)))
+(defn stop! [] (-> i64) (atomic/atomic-store (field (state) stop) 1) 0)
+(export-c [stopping :as "lpc_stopping"])
+(defn copy-text [(allocator (dyn a/Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [(mut out) (str/sb-new allocator)]
+    (str/sb-push-str! (mut out) text) (str/sb-finish! (mut out))))
+(defn init! [] (-> i64)
+  (set! (.receipts (state)) (al/al-new [Receipt] (a/malloc-allocator)))
+  (atomic/atomic-store (field (state) stop) 0)
+  (let [bytes (p/alloc-stack (array u8 32)) (mut token) (str/sb-new (a/malloc-allocator))]
+    (arc4random_buf (p/cast (ptr i8) bytes) 32)
+    (for [i 0 32]
+      (let [value (p/cast i64 (load (p/index bytes i)))]
+        (str/sb-push-byte! (mut token) (slice/slice-get "0123456789abcdef" (/ value 16)))
+        (str/sb-push-byte! (mut token) (slice/slice-get "0123456789abcdef" (% value 16)))))
+    (set! (.token (state)) (str/sb-finish! (mut token))))
+  0)
+(defn integer [(text (slice u8))] (-> i64)
+  (let [(mut value) 0]
+    (block :done
+      (when (= (slice/slice-len text) 0) (break :done -1))
+      (for [i 0 (slice/slice-len text)]
+        (let [digit (- (p/cast i64 (slice/slice-get text i)) 48)]
+          (when (or (< digit 0) (> digit 9)) (break :done -1))
+          (when (> (load value) (/ (- 9223372036854775807 digit) 10)) (break :done -1))
+          (set! value (+ (* (load value) 10) digit))))
+      (load value))))
+(defn number! [(response (ptr b/Response)) (key (slice u8)) (value i64)] (-> i64)
+  (let [buffer (p/alloc-stack (array i8 32))]
+    (snprintf (p/cast (ptr i8) buffer) 32 c"%lld" value)
+    (b/response-string! response key (str/cstr->str (p/cast (ptr i8) buffer)))))
+(defn seconds! [(response (ptr b/Response)) (key (slice u8)) (value f64)] (-> i64)
+  (let [buffer (p/alloc-stack (array i8 64))]
+    (snprintf (p/cast (ptr i8) buffer) 64 c"%.9f" value)
+    (b/response-string! response key (str/cstr->str (p/cast (ptr i8) buffer)))))
+(defn failure! [(response (ptr b/Response)) (message (slice u8))] (-> i64)
+  (b/response-string! response "err" message)
+  (b/response-status-pair! response "error" "done"))
+(defn namespace? [(name (slice u8))] (-> bool)
+  (block :valid
+    (when (= (slice/slice-len name) 0) (break :valid false))
+    (for [i 0 (slice/slice-len name)]
+      (let [c (p/cast i64 (slice/slice-get name i))]
+        (unless (or (and (>= c 97) (<= c 122)) (or (and (>= c 65) (<= c 90))
+          (or (and (>= c 48) (<= c 57)) (or (= c 45) (or (= c 46) (= c 95))))))
+          (break :valid false))))
+    true))
+(defn telemetry! [(response (ptr b/Response)) (revision i64)] (-> i64)
+  (let [sample (metrics/get-sample revision)]
+    (number! response "revision" (.revision sample))
+    (seconds! response "received" (.received sample))
+    (seconds! response "compile-start" (.compile-start sample))
+    (seconds! response "compile-end" (.compile-end sample))
+    (seconds! response "maintenance-end" (.maintenance-end sample))
+    (seconds! response "published" (.published sample))
+    (seconds! response "draw-start" (.draw-start sample))
+    (seconds! response "presented" (.presented sample))
+    (number! response "app-active" (if (.active (.frame sample)) 1 0))
+    (number! response "window-visible" (if (.visible (.frame sample)) 1 0))
+    (number! response "render-width" (.width (.frame sample)))
+    (number! response "render-height" (.height (.frame sample)))
+    (seconds! response "render-scale" (.scale (.frame sample)))
+    (seconds! response "frame-duration" (.duration (.frame sample)))
+    (seconds! response "now" (metrics/now))))
+
+;;; The network worker owns receipt ordering and storage. Duplicate IDs are
+;;; immutable outcomes; reusing an ID with different input is a conflict.
+(defn dispatch-request [(allocator (dyn a/Allocator)) (request (ptr b/Request))] (-> (slice u8))
+  (let [(mut response) (b/response-new allocator)
+        ns (if (= (.ns request) "") "live-demo" (.ns request))
+        source-text (if (= (.op request) "load-file") (.file request) (.code request))]
+    (b/response-string! (mut response) "id" (.id request))
+    (b/response-string! (mut response) "session" "application")
+    (block :reply
+      (unless (or (= (.token request) (.token (state))) (= (.session request) (.token (state))))
+        (failure! (mut response) "session capability required")
+        (break :reply (b/response-finish! (mut response))))
+      (cond
+        (= (.op request) "describe")
+          (do
+            (b/response-string! (mut response) "value" "eval load-file clone describe metrics source status shutdown")
+            (b/response-status! (mut response) "done"))
+        (= (.op request) "clone")
+          (do (b/response-string! (mut response) "new-session" (.token (state)))
+              (b/response-status! (mut response) "done"))
+        (= (.op request) "metrics")
+          (do (telemetry! (mut response) (integer (.revision request)))
+              (b/response-status! (mut response) "done"))
+        (= (.op request) "source")
+          (let [ledger (field (session/instance) sources)
+                index (source/find ledger ns "defn" (.symbol request))]
+            (if (< index 0)
+              (failure! (mut response) "unknown live function")
+              (let [f (al/al-get (.forms ledger) index)]
+                (b/response-string! (mut response) "desired" (.desired f))
+                (b/response-string! (mut response) "accepted" (.accepted f))
+                (b/response-string! (mut response) "diagnostic" (.diagnostic f))
+                (number! (mut response) "attempt" (.attempt f))
+                (number! (mut response) "revision" (.revision f))
+                (number! (mut response) "start" (.lo f))
+                (number! (mut response) "end" (.hi f))
+                (b/response-status! (mut response) "done"))))
+        (= (.op request) "status")
+          (do (number! (mut response) "revision" (session/current-revision))
+              (seconds! (mut response) "now" (metrics/now))
+              (b/response-status! (mut response) "done"))
+        (= (.op request) "shutdown")
+          (do (stop!) (b/response-status! (mut response) "done"))
+        (or (= (.op request) "eval") (= (.op request) "load-file"))
+          (do
+            (when (or (= (.id request) "") (> (slice/slice-len (.id request)) 128))
+              (failure! (mut response) "request id must contain 1..128 bytes")
+              (break :reply (b/response-finish! (mut response))))
+            (for [i 0 (al/al-len (.receipts (state)))]
+              (let [old (al/al-get (.receipts (state)) i)]
+                (when (= (.id old) (.id request))
+                  (if (and (= (.code old) source-text) (and (= (.ns old) ns)
+                      (and (= (.base old) (.base request)) (= (.op old) (.op request)))))
+                    (break :reply (copy-text allocator (.response old)))
+                    (do (failure! (mut response) "request id reused with different input")
+                        (break :reply (b/response-finish! (mut response))))))))
+            (when (>= (al/al-len (.receipts (state))) 4096)
+              (failure! (mut response) "session receipt capacity reached (4096); start a new session")
+              (break :reply (b/response-finish! (mut response))))
+            (cond
+              (not (namespace? ns)) (failure! (mut response) "invalid namespace")
+              (and (!= (.base request) "") (!= (integer (.base request)) (session/current-revision)))
+                (failure! (mut response) "base revision conflict")
+              true
+                (let [(mut source) (str/sb-new allocator)]
+                  (str/sb-push-str! (mut source) "(module ")
+                  (str/sb-push-str! (mut source) ns)
+                  (str/sb-push-str! (mut source) ")\n")
+                  (str/sb-push-str! (mut source) source-text)
+                  (if (= (session/submit! (str/sb-str (load source))) 0)
+                    (do
+                      (number! (mut response) "revision" (session/current-revision))
+                      (b/response-string! (mut response) "ns" ns)
+                      (when (!= (.result (session/instance)) "")
+                        (b/response-string! (mut response) "value" (.result (session/instance))))
+                      (if (.result-overflow (session/instance))
+                        (failure! (mut response) "expression executed; formatted result exceeded 65536 bytes")
+                        (b/response-status! (mut response) "done")))
+                    (failure! (mut response) (session/diagnostic)))))
+            (let [answer (b/response-finish! (mut response)) a (a/malloc-allocator)]
+              (al/al-push! (field (state) receipts)
+                (Receipt :id (copy-text a (.id request)) :code (copy-text a source-text)
+                  :ns (copy-text a ns) :base (copy-text a (.base request)) :op (copy-text a (.op request))
+                  :response (copy-text a answer)))
+              (break :reply answer)))
+        true (failure! (mut response) "unsupported operation"))
+      (b/response-finish! (mut response)))))
+(defn destroy! [] (-> i64)
+  (let [a (a/malloc-allocator)]
+    (for [i 0 (al/al-len (.receipts (state)))]
+      (let [r (al/al-get (.receipts (state)) i)]
+        (a/free a (.id r)) (a/free a (.code r)) (a/free a (.ns r))
+        (a/free a (.base r)) (a/free a (.op r)) (a/free a (.response r))))
+    (al/al-free! (field (state) receipts))
+    (a/free a (.token (state)))))

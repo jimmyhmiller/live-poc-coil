@@ -1,0 +1,86 @@
+;;; benchmark.el --- Unsaved-buffer presentation measurement -*- lexical-binding: t; -*-
+(require 'coil-live)
+(require 'json)
+
+(defun coil-live-benchmark--request (fields connection)
+  (let ((before (float-time)) response received)
+    (nrepl-send-request fields
+                        (lambda (reply) (setq received (float-time) response reply))
+                        connection)
+    (let ((deadline (+ before 10)))
+      (while (and (not response) (< (float-time) deadline))
+        (accept-process-output (get-buffer-process connection) 0.001)))
+    (unless response (error "Benchmark request timed out"))
+    (list response before received)))
+
+(defun coil-live-benchmark--clock (connection)
+  (let (samples)
+    (dotimes (_ 20)
+      (let* ((sample (coil-live-benchmark--request '("op" "status") connection))
+             (reply (nth 0 sample)) (before (nth 1 sample)) (after (nth 2 sample)))
+        (push (list (- after before)
+                    (- (string-to-number (nrepl-dict-get reply "now"))
+                       (/ (+ before after) 2))) samples)))
+    (car (sort samples (lambda (a b) (< (car a) (car b)))))))
+
+(defun coil-live-benchmark--edit (connection record offset)
+  (let* (response
+         (coil-live-response-hook
+          (list (lambda (reply submitted)
+                  (setq response reply)
+                  (setf (alist-get 'submit record) submitted)))))
+    (goto-char (point-max))
+    (coil-live-eval-defun)
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (not response) (< (float-time) deadline))
+        (accept-process-output nil 0.001)))
+    (unless response (error "No edit response"))
+    (when (nrepl-dict-get response "err")
+      (setf (alist-get 'outcome record) "rejected")
+      (error "%s" (nrepl-dict-get response "err")))
+    (let ((revision (nrepl-dict-get response "revision"))
+          (deadline (+ (float-time) 10)) (presented 0) telemetry)
+      (setf (alist-get 'revision record) revision)
+      (while (and (<= presented 0) (< (float-time) deadline))
+        (setq telemetry (car (coil-live-benchmark--request
+                              (list "op" "metrics" "revision" revision) connection))
+              presented (string-to-number (nrepl-dict-get telemetry "presented")))
+        (when (<= presented 0) (accept-process-output nil 0.001)))
+      (when (<= presented 0) (error "Revision %s was not presented" revision))
+      (setf (alist-get 'presented record) presented
+            (alist-get 'latency_ms record)
+            (* 1000 (- presented (alist-get 'submit record) offset))
+            (alist-get 'outcome record) "presented"))
+    (unless (and (buffer-modified-p) (not buffer-file-name))
+      (error "Benchmark stopped using an unsaved buffer"))))
+
+(defun coil-live-benchmark (&optional count)
+  "Measure COUNT unsaved replacements. Preserve failures in the raw report."
+  (let ((count (or count 1000)) (warmup 20) records clock (outcome "incomplete"))
+    (unwind-protect
+        (with-temp-buffer
+          (coil-mode)
+          (insert "(module live-demo)\n")
+          (coil-live-connect)
+          (let ((connection coil-live-connection))
+            (setq clock (coil-live-benchmark--clock connection))
+            (dotimes (index (+ count warmup))
+              (erase-buffer)
+              (insert (format "(module live-demo)\n(defn button-pigment [] (-> u32) %d)\n"
+                              (if (zerop (% index 2)) #x537bbc #xc77855)))
+              (let ((record (list (cons 'index index) (cons 'warmup (< index warmup))
+                                  (cons 'outcome "unpresented") (cons 'submit nil)
+                                  (cons 'revision nil) (cons 'presented nil)
+                                  (cons 'latency_ms nil))))
+                (push record records)
+                (coil-live-benchmark--edit connection record (cadr clock)))
+              (when (zerop (% index 50)) (message "Emacs benchmark: %d" index))
+              (accept-process-output nil (/ (random 18) 1000.0))))
+          (setq outcome "complete"))
+      (with-temp-file "build/emacs-paper.json"
+        (insert (json-encode
+                 `((workload . "emacs-unsaved-definition") (outcome . ,outcome)
+                   (count . ,count) (warmup . ,warmup)
+                   (clock_uncertainty_seconds . ,(and clock (/ (car clock) 2)))
+                   (clock_offset_seconds . ,(cadr clock))
+                   (records . ,(vconcat (nreverse records))))))))))

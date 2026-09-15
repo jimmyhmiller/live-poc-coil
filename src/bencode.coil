@@ -1,0 +1,222 @@
+; Adapted from coil-experiments live-repl codec (42b1913).
+(module live-poc-coil.bencode)
+
+;;; A deliberately small nREPL codec. Requests are dictionaries whose keys and
+;;; values are byte strings. That is the request shape defined by nREPL; nested
+;;; values are only needed in responses (notably the status list).
+(import "coil.alloc" :as alloc)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use [slice-new slice-len slice-get slice-data])
+(import "coil.str" :as str)
+
+(export Request
+        Response
+        request-empty
+        bdecode-request
+        response-new
+        response-string!
+        response-status!
+        response-status-pair!
+        response-list-string!
+        response-dict-start!
+        response-dict-entry-start!
+        response-container-end!
+        response-finish!)
+
+(defstruct Request
+  [(id (slice u8))
+   (session (slice u8))
+   (op (slice u8))
+   (code (slice u8))
+   (file (slice u8))
+   (file-path (slice u8))
+   (ns (slice u8))
+   (symbol (slice u8))
+   (prefix (slice u8))
+   (project (slice u8))  ; optional canonical project identity for file clients
+   (policy (slice u8))  ; coil/file-*: "strict" (default) or "deferred"
+   (format (slice u8)) (token (slice u8)) (base (slice u8)) (revision (slice u8))])  ; coil/file-*: "markdown" (default) or "json"
+
+(defstruct Response [(out str/StrBuf)])
+
+(defn request-empty [] (-> Request)
+  (Request
+    :id ""
+    :session ""
+    :op ""
+    :code ""
+    :file ""
+    :file-path ""
+    :ns ""
+    :symbol ""
+    :prefix ""
+    :project ""
+    :policy ""
+    :format "" :token "" :base "" :revision ""))
+
+(defn text=? [(a (slice u8)) (b (slice u8))] (-> bool)
+  (if (!= (slice-len a) (slice-len b))
+      false
+      (block :same
+             (for [i 0 (slice-len a)]
+               (if (!= (slice-get a i) (slice-get b i))
+                   (return-from :same false)
+                   0))
+             true)))
+
+(defn decimal [(input (slice u8)) (cursor (ptr i64))] (-> i64)
+  (let [(mut n) 0
+        (mut digits) 0]
+    (block :number
+           (loop (if (>= (load cursor) (slice-len input))
+                     (break)
+                     (let [c
+                             (primitive/cast i64
+                                             (slice-get input (load cursor)))]
+                       (if (or (< c 48) (> c 57))
+                           (break)
+                           (do
+                             (when (> (load n)
+                                      (/ (- 9223372036854775807 (- c 48)) 10))
+                               (return-from :number -1))
+                             (set! n (+ (* (load n) 10) (- c 48)))
+                             (set! digits (+ (load digits) 1))
+                             (store! cursor (+ (load cursor) 1)))))))
+           (if (= (load digits) 0) -1 (load n)))))
+
+(defn bdecode-string [(input (slice u8)) (cursor (ptr i64))] (-> (slice u8))
+  ; -2 means incomplete, -1 malformed. A TCP read can end anywhere, including
+  ; inside the length, after its colon, or in a multibyte string payload.
+  (if (>= (load cursor) (slice-len input))
+      (do (store! cursor -2) "")
+      (let [n (decimal input cursor)]
+        (cond (< n 0) (do (store! cursor -1) "")
+              (>= (load cursor) (slice-len input)) (do (store! cursor -2) "")
+              (!= (primitive/cast i64 (slice-get input (load cursor))) 58)
+                (do (store! cursor -1) "")
+              :else
+                (let [start (+ (load cursor) 1)]
+                  (if (> n (- (slice-len input) start))
+                      (do (store! cursor -2) "")
+                      (do
+                        (store! cursor (+ start n))
+                        (slice-new (primitive/index (slice-data input) start) n))))))))
+
+(defn request-set [(request (ptr Request)) (key (slice u8)) (value (slice u8))] (-> i64)
+  (cond (text=? key "id") (set! (.id request) value)
+        (text=? key "session") (set! (.session request) value)
+        (text=? key "op") (set! (.op request) value)
+        (text=? key "code") (set! (.code request) value)
+        (text=? key "file") (set! (.file request) value)
+        (text=? key "file-path") (set! (.file-path request) value)
+        (text=? key "ns") (set! (.ns request) value)
+        (text=? key "symbol") (set! (.symbol request) value)
+        (text=? key "prefix") (set! (.prefix request) value)
+        (text=? key "project") (set! (.project request) value)
+        (text=? key "policy") (set! (.policy request) value)
+        (text=? key "format") (set! (.format request) value)
+        (text=? key "token") (set! (.token request) value)
+        (text=? key "base-revision") (set! (.base request) value)
+        (text=? key "revision") (set! (.revision request) value)
+        :else 0)
+  0)
+
+;;; Returns the byte count consumed, 0 for incomplete input, or -1 for malformed
+;;; input. The caller keeps INPUT alive while it uses the returned slices.
+(defn bdecode-request [(input (slice u8)) (request (ptr Request))] (-> i64)
+  (if (= (slice-len input) 0)
+      0
+      (if (!= (primitive/cast i64 (slice-get input 0)) 100)
+          -1
+          (let [(mut cursor) 1]
+            (store! request (request-empty))
+            (block :result
+                   (loop (if (>= (load cursor) (slice-len input))
+                             (return-from :result 0)
+                             (if (= (primitive/cast i64
+                                                    (slice-get input
+                                                               (load cursor)))
+                                    101)
+                                 (return-from :result (+ (load cursor) 1))
+                                 (let [key (bdecode-string input (mut cursor))]
+                                   (if (< (load cursor) 0)
+                                       (return-from :result
+                                                      (if (= (load cursor) -2)
+                                                          0
+                                                          -1))
+                                       0)
+                                   (let [value
+                                           (bdecode-string input (mut cursor))]
+                                     (if (< (load cursor) 0)
+                                         (return-from :result
+                                                        (if (= (load cursor) -2)
+                                                            0
+                                                            -1))
+                                         0)
+                                     (request-set request key value))))))
+                   0)))))
+
+(defn response-new [(a (dyn alloc/Allocator))] (-> Response)
+  (let [(mut out) (str/sb-new a)]
+    (str/sb-push-str! (mut out) "d")
+    (Response :out (load out))))
+
+(defn append-count! [(out (mut str/StrBuf)) (n i64)] (-> i64)
+  (if (>= n 10) (append-count! (mut out) (/ n 10)) 0)
+  (str/sb-push-byte! (mut out) (primitive/cast u8 (+ 48 (% n 10))))
+  0)
+
+(defn append-string! [(out (mut str/StrBuf)) (value (slice u8))] (-> i64)
+  (append-count! (mut out) (slice-len value))
+  (str/sb-push-str! (mut out) ":")
+  (str/sb-push-str! (mut out) value)
+  0)
+
+(defn response-string! [(response (ptr Response))
+                        (key (slice u8))
+                        (value (slice u8))] (-> i64)
+  (append-string! (mut (.out response)) key)
+  (append-string! (mut (.out response)) value)
+  0)
+
+(defn response-status! [(response (ptr Response)) (status (slice u8))] (-> i64)
+  (append-string! (mut (.out response)) "status")
+  (str/sb-push-str! (mut (.out response)) "l")
+  (append-string! (mut (.out response)) status)
+  (str/sb-push-str! (mut (.out response)) "e")
+  0)
+
+(defn response-status-pair! [(response (ptr Response))
+                             (first (slice u8))
+                             (second (slice u8))] (-> i64)
+  (append-string! (mut (.out response)) "status")
+  (str/sb-push-str! (mut (.out response)) "l")
+  (append-string! (mut (.out response)) first)
+  (append-string! (mut (.out response)) second)
+  (str/sb-push-str! (mut (.out response)) "e")
+  0)
+
+(defn response-list-string! [(response (ptr Response))
+                             (key (slice u8))
+                             (value (slice u8))] (-> i64)
+  (append-string! (mut (.out response)) key)
+  (str/sb-push-str! (mut (.out response)) "l")
+  (append-string! (mut (.out response)) value)
+  (str/sb-push-str! (mut (.out response)) "e")
+  0)
+
+(defn response-dict-start! [(response (ptr Response)) (key (slice u8))] (-> i64)
+  (append-string! (mut (.out response)) key)
+  (str/sb-push-str! (mut (.out response)) "d")
+  0)
+
+(defn response-dict-entry-start! [(response (ptr Response)) (key (slice u8))] (-> i64)
+  (response-dict-start! response key))
+
+(defn response-container-end! [(response (ptr Response))] (-> i64)
+  (str/sb-push-str! (mut (.out response)) "e")
+  0)
+
+(defn response-finish! [(response (ptr Response))] (-> (slice u8))
+  (str/sb-push-str! (mut (.out response)) "e")
+  (str/sb-finish! (mut (.out response))))

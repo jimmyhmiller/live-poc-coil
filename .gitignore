@@ -1,2 +1,10 @@
 .DS_Store
 .claude/settings.local.json
+
+/build
+/.coil
+/.worktrees
+
+/.nrepl-port
+/.live-token
+/scripts/__pycache__/

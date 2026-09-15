@@ -1,0 +1,133 @@
+(module live-poc-coil.source)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.reader" :as reader)
+(import "coil.result" :use *)
+(import "coil.slice" :as slice)
+(import "coil.str" :as str)
+(import "coil.scratch" :as scratch)
+
+;;; Authored source belongs to the session, independently of native acceptance.
+;;; Keys are module + declaration kind + authored name, never a leaf name alone.
+(defstruct Form [(module (slice u8)) (kind (slice u8)) (name (slice u8))
+  (desired (slice u8)) (accepted (slice u8)) (diagnostic (slice u8))
+  (attempt i64) (revision i64) (lo i64) (hi i64)])
+(defstruct Ledger [(forms (al/ArrayList Form)) (attempt i64)
+  (latest (slice u8)) (diagnostic (slice u8))])
+(defn copy [(text (slice u8))] (-> (slice u8))
+  (let [(mut out) (str/sb-new (a/malloc-allocator))]
+    (str/sb-push-str! (mut out) text) (str/sb-finish! (mut out))))
+(defn replace! [(slot (ptr (slice u8))) (text (slice u8))] (-> i64)
+  (let [next (copy text)]
+    (a/free (a/malloc-allocator) (load slot)) (store! slot next))
+  0)
+(defn init! [(ledger (ptr Ledger))] (-> i64)
+  (store! ledger (p/zeroed Ledger))
+  (set! (.forms ledger) (al/al-new [Form] (a/malloc-allocator)))
+  0)
+(defn find [(ledger (ptr Ledger)) (module (slice u8)) (kind (slice u8)) (name (slice u8))] (-> i64)
+  (block :found
+    (for [i 0 (al/al-len (.forms ledger))]
+      (let [f (al/al-get (.forms ledger) i)]
+        (when (and (= (.module f) module) (and (= (.kind f) kind) (= (.name f) name)))
+          (break :found i))))
+    -1))
+(defn declaration? [(kind (slice u8))] (-> bool)
+  (or (= kind "defn") (or (= kind "defn*")
+    (or (= kind "def") (or (= kind "defstruct") (= kind "defsum"))))))
+(defn record-form! [(ledger (ptr Ledger)) (module (slice u8)) (kind (slice u8))
+  (name (slice u8)) (text (slice u8)) (lo i64) (hi i64)] (-> i64)
+  (let [known (find ledger module kind name)
+        index (if (< known 0) (al/al-len (.forms ledger)) known)]
+    (when (< known 0)
+      (al/al-push! (field ledger forms)
+        (Form :module (copy module) :kind (copy kind) :name (copy name)
+          :desired "" :accepted "" :diagnostic "" :attempt 0 :revision 0 :lo 0 :hi 0)))
+    (let [f (al/al-elem [Form] (field ledger forms) index)]
+      (replace! (field f desired) text)
+      (replace! (field f diagnostic) "")
+      (set! (.attempt f) (.attempt ledger))
+      (set! (.lo f) lo) (set! (.hi f) hi)))
+  0)
+
+;;; Read only the submission. The compiler's own reader supplies source spans.
+;;; A read failure still preserves the complete latest desired submission.
+(defn begin! [(ledger (ptr Ledger)) (text (slice u8))] (-> i64)
+  (set! (.attempt ledger) (+ (.attempt ledger) 1))
+  (replace! (field ledger latest) text)
+  (replace! (field ledger diagnostic) "")
+  (let [arena (p/alloc-stack scratch/ScratchArena)]
+    (scratch/scratch-init arena (a/malloc-allocator))
+    (match (reader/read-all (scratch/scratch-allocator arena) text 0)
+      (Err [d] (let [diagnostic d] (replace! (field ledger diagnostic) (.msg diagnostic))))
+      (Ok [forms]
+        (let [(mut module) ""]
+          (for [i 0 (al/al-len (load forms))]
+            (let [f (al/al-elem [reader/Sexp] forms i)]
+              (when (and (reader/sexp-list? f) (>= (reader/sexp-count f) 2))
+                (let [head (reader/sexp-nth f 0) name (reader/sexp-nth f 1)]
+                  (when (and (reader/sexp-sym? head) (reader/sexp-sym? name))
+                    (let [kind (reader/sexp-sym head)]
+                      (cond
+                        (= kind "module") (do (set! module (reader/sexp-sym name)) 0)
+                        (declaration? kind)
+                          (record-form! ledger (load module) kind (reader/sexp-sym name)
+                            (slice/subslice text (.lo f) (.hi f)) (.lo f) (.hi f))
+                        true 0))))))))))
+    (scratch/scratch-close! arena))
+  0)
+(defn finish! [(ledger (ptr Ledger)) (status i64) (revision i64) (diagnostic (slice u8))] (-> i64)
+  (replace! (field ledger diagnostic) diagnostic)
+  (for [i 0 (al/al-len (.forms ledger))]
+    (let [f (al/al-elem [Form] (field ledger forms) i)]
+      (when (= (.attempt f) (.attempt ledger))
+        (if (= status 0)
+          (do (replace! (field f accepted) (.desired f)) (set! (.revision f) revision) 0)
+          (replace! (field f diagnostic) (.diagnostic ledger))))))
+  0)
+(defn destroy! [(ledger (ptr Ledger))] (-> i64)
+  (let [allocator (a/malloc-allocator)]
+    (for [i 0 (al/al-len (.forms ledger))]
+      (let [f (al/al-get (.forms ledger) i)]
+        (a/free allocator (.module f)) (a/free allocator (.kind f)) (a/free allocator (.name f))
+        (a/free allocator (.desired f)) (a/free allocator (.accepted f)) (a/free allocator (.diagnostic f))))
+    (al/al-free! (field ledger forms))
+    (a/free allocator (.latest ledger)) (a/free allocator (.diagnostic ledger)))
+  0)
+
+;;; Native declarations remain top-level. Other submitted forms form one ordered
+;;; evaluation after publication; only its final value is returned to the editor.
+(defn top-level? [(f (ptr reader/Sexp))] (-> bool)
+  (if (not (and (reader/sexp-list? f) (> (reader/sexp-count f) 0))) false
+    (let [head (reader/sexp-nth f 0)]
+      (if (not (reader/sexp-sym? head)) false
+        (let [name (reader/sexp-sym head)]
+          (or (= name "live-poc-coil.meta/evaluate") (or (= name "checker") (or (= name "transform") (or (= name "deftrait") (or (= name "impl") (or (= name "cimport") (or (= name "extern") (or (= name "export-c") (or (= name "export") (or (= name "import") (or (= name "const") (or (= name "derive") (or (= name "module") (declaration? name)))))))))))))))))))
+(defstruct Prepared [(text (slice u8)) (diagnostic (slice u8))])
+(defn prepare [(allocator (dyn a/Allocator)) (text (slice u8))] (-> Prepared)
+  (match (reader/read-all allocator text 0)
+    (Err [_] (Prepared :text text :diagnostic ""))
+    (Ok [forms]
+      (let [(mut declarations) (str/sb-new allocator)
+            (mut expressions) (str/sb-new allocator)
+            (mut count) 0 (mut invalid) false]
+        (for [i 0 (al/al-len (load forms))]
+          (let [f (al/al-elem [reader/Sexp] forms i)
+                bytes (slice/subslice text (.lo f) (.hi f))]
+            (if (top-level? f)
+              (do
+                (when (and (> (load count) 0)
+                           (reader/sexp-sym-is (reader/sexp-nth f 0) "module"))
+                  (set! invalid true) 0)
+                (str/sb-push-str! (mut declarations) bytes)
+                (str/sb-push-str! (mut declarations) "\n") 0)
+              (do (str/sb-push-str! (mut expressions) bytes)
+                  (str/sb-push-str! (mut expressions) "\n")
+                  (set! count (+ (load count) 1)) 0))))
+        (when (> (load count) 0)
+          (str/sb-push-str! (mut declarations) "(live-poc-coil.meta/evaluate (do ")
+          (str/sb-push-str! (mut declarations) (str/sb-str (load expressions)))
+          (str/sb-push-str! (mut declarations) "))"))
+        (Prepared :text (str/sb-str (load declarations))
+          :diagnostic (if (load invalid) "submit expressions from one module at a time" ""))))))

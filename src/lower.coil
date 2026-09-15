@@ -1,0 +1,211 @@
+(module live-poc-coil.lower)
+(import "coil.primitive" :as p)
+(import "coil.jit.lifetime")
+(import "coil.var" :as var)
+(import "live-poc-coil.eval" :as evaluation)
+
+(defannotation :live/definition i64)
+
+(extern lpc_stage :cc c [i64 (ptr i8)] (-> i64))
+
+(extern lpc_resolve :cc c [i64] (-> (ptr i8)))
+
+;;; The policy recognizes concrete authored definitions before binding expansion.
+;;; It owns its supported syntax rather than importing a second reload policy.
+(defn definition? [(f Code)] (-> bool)
+  (and (p/code-list? f) (and (>= (p/code-count f) 5)
+    (and (p/code-sym? (p/code-nth f 1))
+      (or (p/code-eq (p/code-nth f 0) `defn) (p/code-eq (p/code-nth f 0) `defn*))))))
+(defn live-form? [(f Code)] (-> bool)
+  (and (p/code-list? f) (and (> (p/code-count f) 0)
+    (p/code-eq (p/code-nth f 0) `defn))))
+(defn validate-header! [(f Code)] (-> i64)
+  (unless (and (>= (p/code-count f) 5)
+    (and (p/code-sym? (p/code-nth f 1))
+      (and (p/code-vector? (p/code-nth f 2))
+        (and (p/code-list? (p/code-nth f 3))
+          (and (= (p/code-count (p/code-nth f 3)) 2)
+            (p/code-eq (p/code-nth (p/code-nth f 3) 0) `->))))))
+    (p/error "live defn requires a name, concrete typed parameter vector, explicit (-> Type), and body; attributes and generics need static defn*")
+    0)
+  0)
+(defn generic? [(f Code)] (-> bool)
+  (and (>= (p/code-count f) 6)
+    (and (p/code-vector? (p/code-nth f 2)) (p/code-vector? (p/code-nth f 3)))))
+(defn struct-type? [(m Code) (t Code)] (-> bool)
+  (let [(mut found) false]
+    (for [i 1 (p/code-count m)]
+      (let [f (p/code-nth m i)]
+        (when (and (p/code-list? f) (and (>= (p/code-count f) 2)
+          (and (p/code-eq (p/code-nth f 0) `defstruct) (p/code-eq (p/code-nth f 1) t))))
+          (set! found true) 0)))
+    (load found)))
+(defn body [(f Code) (start i64) (end i64)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i start end] (p/code-list-push! out (p/code-nth f i)))
+    (p/code-list-done out)))
+
+;;; Session entry marker. The transform generates only staging writes here.
+(defn publish [] (-> Code)
+  (p/error "live publication requires the session transaction entry"))
+
+(defn marker? [(x Code)] (-> bool)
+  (and (p/code-list? x)
+       (and (= (p/code-count x) 1)
+            (p/code-eq (p/code-nth x 0) `live-poc-coil.meta/publish))))
+
+(defn entry? [(f Code)] (-> bool)
+  (and (definition? f) (and (= (p/code-count f) 5) (marker? (p/code-nth f 4)))))
+
+(defn active? [(m Code)] (-> bool)
+  (let [(mut found) false]
+    (for [i 1 (p/code-count m)]
+      (when (entry? (p/code-nth m i)) (set! found true) 0))
+    (load found)))
+
+(defn lookup [(state Code) (module Code) (name Code)] (-> i64)
+  (let [(mut found) -1]
+    (for [i 0 (p/code-count state)]
+      (let [item (p/code-nth state i)]
+        (when (and (p/code-eq (p/code-nth item 0) module)
+                   (p/bound-identifier=? (p/code-nth item 1) name))
+          (set! found i)
+          0)))
+    (load found)))
+
+(defn args [(params Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 (p/code-count params)]
+      (let [param (p/code-nth params i)]
+        (unless (and (= (p/code-count param) 2)
+                     (p/code-sym? (p/code-nth param 0)))
+          (p/error "live parameters currently require a name and explicit type")
+          0)
+        (p/code-list-push! out (p/code-nth param 0))))
+    (p/code-list-done out)))
+
+(defn parameter-types [(m Code) (params Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 (p/code-count params)]
+      (let [t (p/code-nth (p/code-nth params i) 1)]
+        (p/code-list-push! out
+                           (if (or (struct-type? m t)
+                                   (p/code-eq (p/code-type-shape t) `struct))
+                               `(ref ~t)
+                               t))))
+    (p/code-list-done out)))
+
+(defn lower [(m Code) (registry (ptr Code)) (static-gate bool)] (-> Code)
+  (let [out (p/code-list-new)
+        updates (p/code-list-new)
+        (mut evaluations) 0
+        module (p/code-nth m 0)]
+    (p/code-list-push! out module)
+    (for [i 1 (p/code-count m)]
+      (let [f (p/code-nth m i)]
+        (cond (entry? f) 0
+              (and (p/code-list? f) (and (= (p/code-count f) 2)
+                (p/code-eq (p/code-nth f 0) `live-poc-coil.meta/evaluate)))
+                (let [implementation (p/fresh-identifier "evaluation")]
+                  (when (> (load evaluations) 0)
+                    (p/error "one ordered evaluation block is permitted per submission") 0)
+                  (set! evaluations (+ (load evaluations) 1))
+                  (p/code-list-push! out
+                    `(defn* ~implementation :jit/retain false [] (-> i64)
+                       (evaluation/capture ~(p/code-nth f 1))))
+                  (p/code-list-push! updates
+                    `(evaluation/lpc_stage_eval (p/fnptr-of ~implementation)))
+                  0)
+              (live-form? f)
+                (do
+                  (validate-header! f)
+                  (when (generic? f)
+                    (p/error "generic live definitions require specialization dependency support")
+                    0)
+                  (let [name (p/code-nth f 1)
+                        params (p/code-nth f 2)
+                        retform (p/code-nth f 3)
+                        ret (p/code-nth retform 1)
+                        known (lookup (load registry) module name)
+                        id (if (< known 0) (p/code-count (load registry)) known)
+                        helper
+                          (if (< known 0)
+                              (p/fresh-identifier "stage-typed")
+                              (p/code-nth (p/code-nth (load registry) known) 2))
+                        implementation (p/fresh-identifier (p/code-str name))
+                        gate (if static-gate name (p/fresh-identifier "entry-gate"))
+                        types (if (< known 0) (parameter-types m params) (p/code-nth (p/code-nth (load registry) known) 3))]
+                    (when (>= id 65536)
+                      (p/error "live session supports at most 65536 function identities")
+                      0)
+                    (when (p/code-eq ret `Code)
+                      (p/error "use defn* for static metaprogram helpers")
+                      0)
+                    (p/code-list-push! out
+                                       `(defn* ~implementation
+                                          :jit/retain
+                                          false
+                                          :live/definition ~id
+                                          ~params
+                                          ~retform
+                                          ~@(body f 4 (p/code-count f))))
+                    (when (< known 0)
+                      (p/code-list-push! out
+                                         `(defn* ~gate
+                                            ~params
+                                            ~retform
+                                            (p/call-ptr (p/cast (fnptr c
+                                                                       [~@types]
+                                                                       ~ret)
+                                                                (lpc_resolve ~id))
+                                                        ~@(args params))))
+                      (unless static-gate
+                      (p/code-list-push! out
+                                         `(def ~name
+                                            (var/var-static (fnptr c
+                                                                   [~@types]
+                                                                   ~ret)
+                                                            (p/fnptr-of ~gate))))
+                        0)
+                      (p/code-list-push! out
+                                         `(defn* ~helper [(address (fnptr c
+                                                                          [~@types]
+                                                                          ~ret))] (-> i64)
+                                            (lpc_stage ~id
+                                                       (p/cast (ptr i8) address))))
+                      (store! registry
+                              `(~@(load registry) (~module ~name ~helper ~types)))
+                      0)
+                    ; The retained typed helper makes the checker validate the full
+                    ; function-pointer ABI against the original gate on replacement.
+                    (p/code-list-push! updates
+                                       `(~helper (p/fnptr-of ~implementation)))
+                    0))
+              true (do (p/code-list-push! out f) 0))))
+    (for [i 1 (p/code-count m)]
+      (let [f (p/code-nth m i)]
+        (when (entry? f)
+          (p/code-list-push! out
+                             `(~(p/code-nth f 0) ~(p/code-nth f 1)
+                                 ~(p/code-nth f 2)
+                                 ~(p/code-nth f 3)
+                                 (do ~@(p/code-list-done updates) 0)))
+          0)))
+    (p/code-list-done out)))
+
+(defn transform-session [(modules Code)] (-> Code)
+  (let [(mut enabled) false]
+    (for [i 0 (p/code-count modules)]
+      (when (active? (p/code-nth modules i)) (set! enabled true) 0))
+    (if (not (load enabled))
+        `(do ~@modules)
+        (let [(mut registry) (p/code-session-state `())
+              out (p/code-list-new)]
+          (for [i 0 (p/code-count modules)]
+            (let [m (p/code-nth modules i)]
+              (p/code-list-push! out
+                                 (if (active? m) (lower m (mut registry) false) m))))
+          (p/code-session-stage! (load registry))
+          `(do ~@(p/code-list-done out))))))
+
+

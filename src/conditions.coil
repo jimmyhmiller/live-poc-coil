@@ -1,0 +1,73 @@
+(module live-poc-coil.conditions)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+
+;;; A candidate owns this graph until publication. Direct conditions come from
+;;; checked artifacts; effective conditions include their dependency closure.
+;;; Edges use resolved declaration identities supplied by semantic lowering.
+(defstruct Definition [(id i64) (abi i64) (epoch i64)
+  (direct i64) (effective i64) (covered bool)])
+(defstruct Edge [(from i64) (to i64)])
+(defstruct Graph [(definitions (al/ArrayList Definition)) (edges (al/ArrayList Edge))])
+(defn init! [(graph (ptr Graph))] (-> i64)
+  (set! (.definitions graph) (al/al-new [Definition] (a/malloc-allocator)))
+  (set! (.edges graph) (al/al-new [Edge] (a/malloc-allocator)))
+  0)
+(defn find [(graph (ptr Graph)) (id i64)] (-> i64)
+  (block :found
+    (for [i 0 (al/al-len (.definitions graph))]
+      (let [definition (al/al-get (.definitions graph) i)]
+        (when (= (.id definition) id) (break :found i))))
+    -1))
+(defn declare! [(graph (ptr Graph)) (id i64) (abi i64)] (-> i64)
+  (if (or (< id 0) (or (< abi 0) (>= (find graph id) 0))) -1
+    (do (al/al-push! (field graph definitions)
+          (Definition :id id :abi abi :epoch 0 :direct 0 :effective 0 :covered false))
+        0)))
+(defn edge! [(graph (ptr Graph)) (from i64) (to i64)] (-> i64)
+  (if (or (< (find graph from) 0) (< (find graph to) 0)) -1
+    (block :added
+      (for [i 0 (al/al-len (.edges graph))]
+        (let [edge (al/al-get (.edges graph) i)]
+          (when (and (= (.from edge) from) (= (.to edge) to)) (break :added 0))))
+      (al/al-push! (field graph edges) (Edge :from from :to to))
+      0)))
+(defn cover! [(graph (ptr Graph)) (id i64) (abi i64) (epoch i64) (condition i64)] (-> i64)
+  (let [index (find graph id)]
+    (if (or (< index 0) (or (< condition 0) (<= epoch 0))) -1
+      (let [definition (al/al-elem [Definition] (field graph definitions) index)]
+        (if (!= (.abi definition) abi) -2
+          (do (set! (.epoch definition) epoch) (set! (.direct definition) condition)
+              (set! (.covered definition) true) 0))))))
+;;; A complete candidate must cover every supplied affected identity in this
+;;; exact epoch; an old Ready implementation cannot satisfy new schema coverage.
+(defn complete? [(graph (ptr Graph)) (epoch i64)] (-> bool)
+  (block :complete
+    (for [i 0 (al/al-len (.definitions graph))]
+      (let [definition (al/al-get (.definitions graph) i)]
+        (unless (and (.covered definition) (= (.epoch definition) epoch))
+          (break :complete false))))
+    true))
+(defn propagate! [(graph (ptr Graph))] (-> i64)
+  (for [i 0 (al/al-len (.definitions graph))]
+    (let [definition (al/al-elem [Definition] (field graph definitions) i)]
+      (set! (.effective definition) (.direct definition))))
+  (let [(mut changed) true]
+    (loop
+      (unless (load changed) (break))
+      (set! changed false)
+      (for [i 0 (al/al-len (.edges graph))]
+        (let [edge (al/al-get (.edges graph) i)
+              from (al/al-elem [Definition] (field graph definitions) (find graph (.from edge)))
+              to (al/al-elem [Definition] (field graph definitions) (find graph (.to edge)))]
+          (when (and (= (.effective from) 0) (!= (.effective to) 0))
+            (set! (.effective from) (.effective to))
+            (set! changed true) 0)))))
+  0)
+(defn condition [(graph (ptr Graph)) (id i64)] (-> i64)
+  (let [index (find graph id)]
+    (if (< index 0) -1 (let [definition (al/al-get (.definitions graph) index)] (.effective definition)))))
+(defn destroy! [(graph (ptr Graph))] (-> i64)
+  (al/al-free! (field graph definitions)) (al/al-free! (field graph edges))
+  0)

@@ -1,0 +1,197 @@
+(module live-poc-coil.runtime)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.slice" :as slice)
+(import "coil.sync" :as sync)
+(import "coil.result" :use *)
+
+(cimport "pthread.h"
+         :use
+         [pthread_key_create
+          pthread_key_delete
+          pthread_getspecific
+          pthread_setspecific])
+
+;;; An Image owns exactly one JIT generation lease. The compiler lane releases
+;;; it only after every entry in every live view stops referring to this image.
+(defstruct Image [(token i64) (references i64)])
+
+(defstruct Entry [(address (ptr i8)) (image (ptr Image)) (condition i64)])
+
+(defstruct View [(revision i64) (readers i64) (entries (al/ArrayList Entry))])
+
+(defstruct Runtime
+  [(mutex sync/Mutex)
+   (current (ptr View))
+   (views (al/ArrayList (ptr View)))
+   (images (al/ArrayList (ptr Image)))
+   (key u64)
+   (closed bool)])
+
+(defn lock! [(r (ptr Runtime))] (-> i64)
+  (match (sync/mutex-lock! (field r mutex))
+    (Ok [n] n)
+    (Err [_] (a/oom-at c"live mutex lock" 0))))
+
+(defn unlock! [(r (ptr Runtime))] (-> i64)
+  (match (sync/mutex-unlock! (field r mutex))
+    (Ok [n] n)
+    (Err [_] (a/oom-at c"live mutex unlock" 0))))
+
+(defn free-one! [T] [(value (ptr T))] (-> i64)
+  (a/free [T] (a/malloc-allocator) (slice/slice-new value 1)))
+
+(defn view-new [(revision i64)] (-> (ptr View))
+  (a/box! (a/malloc-allocator)
+          View
+          (View
+            :revision revision
+            :readers 0
+            :entries (al/al-new [Entry] (a/malloc-allocator)))))
+
+(defn init! [(r (ptr Runtime))] (-> i64)
+  (store! r (p/zeroed Runtime))
+  (match (sync/mutex-init (field r mutex))
+    (Err [_] -1)
+    (Ok [_]
+        (if (!= (pthread_key_create (field r key)
+                                    (p/cast (fnptr c [(ptr i8)] void)
+                                            (p/cast (ptr i8) 0)))
+                0)
+            (do (sync/mutex-destroy! (field r mutex)) -2)
+            (do
+              (set! (.views r) (al/al-new [(ptr View)] (a/malloc-allocator)))
+              (set! (.images r) (al/al-new [(ptr Image)] (a/malloc-allocator)))
+              (set! (.current r) (view-new 0))
+              (al/al-push! (field r views) (.current r))
+              0)))))
+
+;;; Caller holds the compiler lane; view entries never mutate after publication.
+(defn clone-current! [(r (ptr Runtime))] (-> (ptr View))
+  (lock! r)
+  (let [v (view-new (+ (.revision (.current r)) 1))
+        old (.current r)]
+    (for [i 0 (al/al-len (.entries old))]
+      (let [e (al/al-get (.entries old) i)]
+        (when (!= (p/cast i64 (.image e)) 0)
+          (set! (.references (.image e)) (+ (.references (.image e)) 1)))
+        (al/al-push! (field v entries) e)))
+    (unlock! r)
+    v))
+
+(defn stage! [(v (ptr View)) (id i64) (address (ptr i8))] (-> i64)
+  (if (or (< id 0) (> id 65535))
+      -1
+      (do
+        (loop (if (> (al/al-len (.entries v)) id)
+                  (break)
+                  (al/al-push! (field v entries) (p/zeroed Entry))))
+        (let [e (al/al-elem (field v entries) id)]
+          (when (!= (p/cast i64 (.image e)) 0)
+            (set! (.references (.image e)) (- (.references (.image e)) 1)))
+          (store! e
+                  (Entry
+                    :address address
+                    :image (p/cast (ptr Image) 0)
+                    :condition 0)))
+        0)))
+
+;;; The staged code is still private. Reserve its exact generation ownership
+;;; before making a pointer visible to any application invocation.
+(defn own-staged! [(r (ptr Runtime)) (v (ptr View)) (token i64)] (-> i64)
+  (assert (> token 0))
+  (let [image
+          (a/box! (a/malloc-allocator) Image (Image :token token :references 0))]
+    (for [i 0 (al/al-len (.entries v))]
+      (let [e (al/al-elem (field v entries) i)]
+        (when (and (= (p/cast i64 (.image e)) 0)
+                   (!= (p/cast i64 (.address e)) 0))
+          (set! (.image e) image)
+          (set! (.references image) (+ (.references image) 1)))))
+    (al/al-push! (field r images) image))
+  0)
+
+(defn publish! [(r (ptr Runtime)) (v (ptr View))] (-> i64)
+  ; Reserve registry storage before acquiring the publication lock.
+  (al/al-reserve! (field r views) (+ (al/al-len (.views r)) 1))
+  (lock! r)
+  (assert (not (.closed r)))
+  (assert (= (.revision v) (+ (.revision (.current r)) 1)))
+  (al/al-push! (field r views) v)
+  (set! (.current r) v)
+  (unlock! r)
+  0)
+
+;;; An invocation owns a view until leave!, including all nested live calls.
+(defn enter! [(r (ptr Runtime))] (-> (ptr View))
+  (assert (= (p/cast i64 (pthread_getspecific (.key r))) 0))
+  (lock! r)
+  (let [v (if (.closed r) (p/cast (ptr View) 0) (.current r))]
+    (when (!= (p/cast i64 v) 0) (set! (.readers v) (+ (.readers v) 1)))
+    (unlock! r)
+    (assert (= (pthread_setspecific (.key r) (p/cast (ptr i8) v)) 0))
+    v))
+
+(defn leave! [(r (ptr Runtime))] (-> i64)
+  (let [v (p/cast (ptr View) (pthread_getspecific (.key r)))]
+    (assert (!= (p/cast i64 v) 0))
+    (assert (= (pthread_setspecific (.key r) (p/cast (ptr i8) 0)) 0))
+    (lock! r)
+    (assert (> (.readers v) 0))
+    (set! (.readers v) (- (.readers v) 1))
+    (unlock! r)))
+
+(defn resolve [(r (ptr Runtime)) (id i64)] (-> (ptr i8))
+  (let [v (p/cast (ptr View) (pthread_getspecific (.key r)))]
+    (assert (!= (p/cast i64 v) 0))
+    (assert (and (>= id 0) (< id (al/al-len (.entries v)))))
+    (let [e (al/al-get (.entries v) id)]
+      (assert (= (.condition e) 0))
+      (assert (!= (p/cast i64 (.address e)) 0))
+      (.address e))))
+
+(defn drop-view! [(v (ptr View))] (-> i64)
+  (assert (= (.readers v) 0))
+  (for [i 0 (al/al-len (.entries v))]
+    (let [e (al/al-get (.entries v) i)]
+      (when (!= (p/cast i64 (.image e)) 0)
+        (assert (> (.references (.image e)) 0))
+        (set! (.references (.image e)) (- (.references (.image e)) 1)))))
+  (al/al-free! (field v entries))
+  (free-one! v))
+
+;;; Detach unpinned views under the lock. JIT release happens afterwards on the
+;;; compiler lane; completion and main-thread drawing never acquire that lane.
+(defn collect-views! [(r (ptr Runtime))] (-> i64)
+  (lock! r)
+  (let [(mut kept) 0]
+    (for [i 0 (al/al-len (.views r))]
+      (let [v (al/al-get (.views r) i)]
+        (if (and (!= v (.current r)) (= (.readers v) 0))
+            (drop-view! v)
+            (do
+              (al/al-set! (field r views) (load kept) v)
+              (set! kept (+ (load kept) 1))
+              0))))
+    (set! (.len (field r views)) (load kept)))
+  (unlock! r))
+
+(defn close! [(r (ptr Runtime))] (-> bool)
+  (lock! r)
+  (set! (.closed r) true)
+  (let [(mut drained) true]
+    (for [i 0 (al/al-len (.views r))]
+      (when (> (.readers (al/al-get (.views r) i)) 0) (set! drained false) 0))
+    (when (load drained) (set! (.current r) (p/cast (ptr View) 0)))
+    (unlock! r)
+    (load drained)))
+
+(defn destroy! [(r (ptr Runtime))] (-> i64)
+  (assert (.closed r))
+  (assert (= (al/al-len (.views r)) 0))
+  (assert (= (al/al-len (.images r)) 0))
+  (al/al-free! (field r views))
+  (al/al-free! (field r images))
+  (assert (= (pthread_key_delete (.key r)) 0))
+  (match (sync/mutex-destroy! (field r mutex)) (Ok [n] n) (Err [_] -1)))

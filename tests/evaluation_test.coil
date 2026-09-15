@@ -1,0 +1,13 @@
+(module live-poc-coil.evaluation-test)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.session" :as s)
+
+(deftest typed-aggregate-and-ordered-effects
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (import \"coil.debug\" :use *) (defstruct Point [(x i64) (y i64)]) (derive Debug Point) (defn* count [] (-> (ptr i64)) (coil.primitive/alloc-static i64))") 0))
+  (assert (= (s/submit! "(module demo) (set! (count) 1) (set! (count) (+ (load (count)) 2)) (Point :x (load (count)) :y 4)") 0))
+  (assert (= (.result (s/instance)) "(Point :x 3 :y 4)"))
+  (assert (!= (s/submit! "(module demo) (set! (count) 100) (+ true 1)") 0))
+  (assert (= (s/submit! "(module demo) (load (count))") 0))
+  (assert (= (.result (s/instance)) "3"))
+  (assert (= (s/close!) 0)))

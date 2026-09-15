@@ -1,0 +1,34 @@
+(module live-poc-coil.presentation-test)
+(import "coil.primitive" :as p)
+(import "coil.atomic" :as atomic)
+(import "live-poc-coil.presentation" :as observer)
+(import "live-poc-coil.metrics" :as metrics)
+(extern copy-block :as "_Block_copy" :cc c [(ptr i8)] (-> (ptr i8)))
+(extern release-block :as "_Block_release" :cc c [(ptr i8)] (-> void))
+(deftest copied-block-outlives-retired-session
+  (metrics/init!)
+  (metrics/record! 1 1.0 1.0 2.0 2.0)
+  (let [o (observer/observer-new)
+        sample (observer/sample-new o 1)
+        stack (p/alloc-stack observer/Block)]
+    (observer/init-block! stack sample)
+    (let [copy (copy-block (p/cast (ptr i8) stack))
+          second (copy-block copy)]
+      (observer/sample-release! sample)
+      (observer/deliver! (.sample (p/cast (ptr observer/Block) copy)) 3.0)
+      (let [measured (metrics/get-sample 1)] (assert (= (p/cast i64 (.presented measured)) 3)))
+      (observer/observer-retire! o)
+      (metrics/destroy!)
+      ; This must not touch the destroyed session metrics mutex or storage.
+      (observer/deliver! (.sample (p/cast (ptr observer/Block) copy)) 4.0)
+      (release-block copy)
+      (assert (= (atomic/atomic-load (observer/sample-count)) 1))
+      (release-block second)))
+  (assert (= (atomic/atomic-load (observer/sample-count)) 0))
+  (assert (= (atomic/atomic-load (observer/observer-count)) 0)))
+(deftest failed-presentation-with-no-block-copy-releases-context
+  (let [o (observer/observer-new) sample (observer/sample-new o 1)]
+    (observer/sample-release! sample)
+    (observer/observer-retire! o))
+  (assert (= (atomic/atomic-load (observer/sample-count)) 0))
+  (assert (= (atomic/atomic-load (observer/observer-count)) 0)))

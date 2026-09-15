@@ -1,0 +1,10 @@
+;;; C ABI for the host-owned Paper renderer. No Paper implementation is imported
+;;; into the retained compiler; callbacks remain pinned by the application host.
+(module live-poc-coil.paper-api)
+(extern run :as "lpc_paper_run" :cc c [(fnptr c [] i64) (fnptr c [i64 i64 f64 f64] i64)] (-> i64))
+(extern begin :as "lpc_paper_begin" :cc c [u32] (-> i64))
+(extern redraw :as "lpc_paper_redraw" :cc c [] (-> i64))
+(extern panel :as "lpc_paper_panel" :cc c [f64 f64 f64 f64 f64 f64] (-> i64))
+(extern caption :as "lpc_paper_caption" :cc c [f64 f64 f64 f64 f64 u32 i64 (ptr i8)] (-> i64))
+(extern button :as "lpc_paper_button" :cc c [i64 f64 f64 f64 f64 (ptr i8) bool u32] (-> i64))
+(extern number :as "lpc_paper_number" :cc c [f64 f64 f64 u32 i64] (-> i64))
