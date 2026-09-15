@@ -43,3 +43,11 @@ The accepted policy state retains the latest authored function forms as syntax. 
 Each rechecked function stages its exact authored source text with its condition. Source publication covers both submitted forms and rechecked dependencies. It preserves a newer rejected desired edit and its diagnostic when the compiled body came from accepted source; it can also accept desired source if a changed schema makes that body valid.
 
 `syntax-rewrite.coil` is the scoped core-expression rewrite used by the upcoming schema pass. Compiled tests cover local and parameter shadowing, mutable bindings, closures, loops, match bindings, field labels, constructors, and pointer type positions. Import/qualified-name mapping, schema declaration traversal, and ownership/purity analysis remain separate required work.
+
+## Checked pure values
+
+`purity.coil`, registered by the live policy, checks scalar arithmetic, plain record/sum construction and projection, immutable locals, and closed checked helper calls. It verifies resolved local binding identities and rejects global reads, stores, raw storage/pointers, unchecked helpers, and direct/mutual recursion. The helper-cycle walk memoizes completed nodes. Owned containers and generic helper/value policies require further implementation.
+
+Function-body root reflection needed a Coil correction (`3b12e52`). Its focused regression, modernization, generated/lifetime gates, and full self-host verification pass; the fix is installed globally, committed, and pushed.
+
+Physical type retention is still unresolved. `:jit/retain false` currently applies only to concrete runtime functions; putting it on `defstruct` fails at the field-vector parser. Do not claim ephemeral physical type metadata or unbounded schema-edit retention tests until the compiler artifact policy supports them.

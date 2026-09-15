@@ -3,3 +3,6 @@
 (transform transform-session :phase before-expand)
 (import "live-poc-coil.semantic" :as semantic)
 (transform-once semantic/transform)
+
+(import "live-poc-coil.purity" :as purity :reexport)
+(checker purity/check)

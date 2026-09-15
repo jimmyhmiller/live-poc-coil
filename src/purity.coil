@@ -1,0 +1,169 @@
+(module live-poc-coil.purity)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.syntax-rewrite" :as syntax)
+
+;;; Pure defaults and field transitions are value computations. This checked
+;;; subset admits plain records/sums, immutable locals and checked helpers.
+;;; Resource-bearing value policies have a separate owned preparation ABI.
+(defannotation :live/pure bool)
+(defn scalar? [(type Code)] (-> bool)
+  (let [types '(bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64)]
+    (block :found
+      (for [i 0 (p/code-count types)]
+        (when (p/code-eq type (p/code-nth types i)) (break :found true)))
+      false)))
+(defn plain? [(type Code) (depth i64)] (-> bool)
+  (block :done
+    (when (> depth 64) (break :done false))
+    (when (scalar? type) (break :done true))
+    (when (and (syntax/head? type `ref) (= (p/code-count type) 2))
+      (break :done (plain? (p/code-nth type 1) (+ depth 1))))
+    (unless (p/code-sym? type) (break :done false))
+    (let [shape (p/code-type-shape type)]
+      (cond (p/code-eq shape `struct)
+        (do
+          (for [i 0 (p/code-field-count type)]
+            (unless (plain? (p/code-field-qtype type i) (+ depth 1)) (break :done false)))
+          (break :done true))
+        (p/code-eq shape `sum)
+        (do
+          (for [vi 0 (p/code-variant-count type)]
+            (for [fi 0 (p/code-variant-fields type vi)]
+              (unless (plain? (p/code-variant-field-type type vi fi) (+ depth 1)) (break :done false))))
+          (break :done true))
+        :else 0))
+    false))
+(defn selected? [(form Code)] (-> bool)
+  (block :found
+    (unless (or (syntax/head? form `defn) (syntax/head? form `defn*)) (break :found false))
+    (for [i 2 (p/code-count form)]
+      (when (p/code-vector? (p/code-nth form i)) (break :found false))
+      (when (and (p/code-eq (p/code-nth form i) `:live/pure)
+        (p/code-eq (p/code-nth form (+ i 1)) `true)) (break :found true)))
+    false))
+(defn declaration? [(decl Code)] (-> bool)
+  (and (syntax/head? decl `decl) (>= (p/code-count decl) 4)))
+(defn helper? [(decl Code) (helpers Code)] (-> bool)
+  (block :found
+    (unless (declaration? decl) (break :found false))
+    (for [i 0 (p/code-count helpers)]
+      (let [other (p/code-decl (p/code-nth (p/code-nth helpers i) 1))]
+        (when (and (declaration? other)
+          (p/code-eq (p/code-nth decl 3) (p/code-nth other 3))) (break :found true))))
+    false))
+(defn arguments! [(form Code) (start i64) (bound Code) (helpers Code)] (-> i64)
+  (for [i start (p/code-count form)]
+    (unless (p/code-keyword? (p/code-nth form i))
+      (expression! (p/code-nth form i) bound helpers) 0)) 0)
+(defn immutable-let! [(form Code) (bound Code) (helpers Code)] (-> i64)
+  (let [bindings (p/code-nth form 1) (mut scope) bound]
+    (for [i 0 (/ (p/code-count bindings) 2)]
+      (let [binder (p/code-nth bindings (* i 2)) value (p/code-nth bindings (+ (* i 2) 1))]
+        (unless (p/code-sym? binder)
+          (p/report binder "pure preparation allows immutable value bindings only") 0)
+        (expression! value (load scope) helpers)
+        (set! scope `(~@(load scope) ~binder))))
+    (arguments! form 2 (load scope) helpers)))
+(defn match! [(form Code) (bound Code) (helpers Code)] (-> i64)
+  (expression! (p/code-nth form 1) bound helpers)
+  (for [i 2 (p/code-count form)]
+    (let [arm (p/code-nth form i) binders (p/code-nth (p/code-nth form i) 1)]
+      (arguments! arm 2 `(~@bound ~@binders) helpers))) 0)
+(defn arithmetic? [(form Code)] (-> bool)
+  (let [ops '(+ - * = != < > <= >= not) (mut found) false]
+    (for [i 0 (p/code-count ops)]
+      (when (p/code-eq (p/code-nth form 0) (p/code-nth ops i)) (set! found true) 0))
+    (when (load found)
+      (for [i 1 (p/code-count form)]
+        (unless (scalar? (p/type-of (p/code-nth form i))) (set! found false) 0)))
+    (load found)))
+(defn expression! [(form Code) (bound Code) (helpers Code)] (-> i64)
+  (cond
+    (or (p/code-int? form) (p/code-float? form)) 0
+    (or (p/code-eq form `true) (p/code-eq form `false)) 0
+    (p/code-sym? form)
+      (do (unless (and (syntax/named? bound form)
+          (and (> (p/binding-of form) 0) (p/code-eq (p/code-decl form) `:unresolved)))
+        (p/report form "pure preparation may only read resolved parameters and immutable locals") 0) 0)
+    (not (p/code-list? form))
+      (do (p/report form "unsupported value in pure preparation") 0)
+    (or (syntax/head? form `let*) (syntax/head? form `let)) (immutable-let! form bound helpers)
+    (syntax/head? form `match) (match! form bound helpers)
+    (or (syntax/head? form `if) (syntax/head? form `do)) (arguments! form 1 bound helpers)
+    :else
+      (let [decl (p/code-decl form)]
+        (cond
+          (helper? decl helpers) (arguments! form 1 bound helpers)
+          (and (declaration? decl)
+            (or (p/code-eq (p/code-nth decl 2) `struct) (p/code-eq (p/code-nth decl 2) `sum)))
+            (do
+              (unless (plain? (p/type-of form) 0)
+                (p/report form "pure construction requires a plain value policy") 0)
+              (arguments! form 1 bound helpers))
+          ; Field projection is a load from a checked plain input value. Raw
+          ; loads, address-taking and arbitrary pointer reads are not admitted.
+          (and (declaration? decl) (and (= (p/code-count form) 2)
+            (p/code-eq (p/code-nth decl 3) `coil.primitive.load)))
+            (let [head (p/code-nth form 0) base (p/code-nth form 1)]
+              (if (and (p/code-sym? head) (plain? (p/type-of base) 0))
+                (expression! base bound helpers)
+                (do (p/report form "pure preparation cannot read raw storage") 0)))
+          (and (not (declaration? decl)) (arithmetic? form)) (arguments! form 1 bound helpers)
+          :else (do (p/report form "pure preparation cannot call unchecked functions or perform effects") 0))))
+  0)
+(defn function! [(form Code) (helpers Code)] (-> i64)
+  (let [(mut at) -1 (mut bound) '()]
+    (for [i 2 (p/code-count form)]
+      (when (p/code-vector? (p/code-nth form i)) (set! at i) (break)))
+    (when (or (< (load at) 0) (p/code-vector? (p/code-nth form (+ (load at) 1))))
+      (p/error "pure preparation helpers require concrete typed signatures") 0)
+    (let [params (p/code-nth form (load at))]
+      (for [i 0 (p/code-count params)]
+        (let [param (p/code-nth params i)]
+          (unless (and (p/code-list? param) (= (p/code-count param) 2))
+            (p/error "pure preparation helpers require named typed parameters") 0)
+          (unless (plain? (p/code-nth param 1) 0)
+            (p/report param "pure preparation parameter requires a plain value policy") 0)
+          (set! bound `(~@(load bound) ~(p/code-nth param 0))))))
+    (unless (plain? (p/code-nth (p/code-nth form (+ (load at) 1)) 1) 0)
+      (p/report form "pure preparation result requires a plain value policy") 0)
+    (arguments! form (+ (load at) 2) (load bound) helpers)))
+(defn visit-helper! [(name Code) (helpers Code) (path Code) (complete (ptr Code))] (-> i64)
+  (block :done
+    (when (syntax/named? (load complete) name) (break :done 0))
+    (when (syntax/named? path name)
+      (p/report name "recursive helpers are not supported in rollback-capable preparation")
+      (break :done 0))
+    (when (> (p/code-count path) 128)
+      (p/report name "pure preparation helper depth exceeds 128") (break :done 0))
+    (for [i 0 (p/code-count helpers)]
+      (let [helper (p/code-nth helpers i)
+            target (p/code-decl (p/code-nth (p/code-nth helpers i) 1))]
+        (when (and (declaration? target) (p/code-eq (p/code-nth target 3) name))
+          (helper-body-cycles! helper helpers `(~@path ~name) complete) 0)))
+    (store! complete `(~@(load complete) ~name)) 0))
+(defn helper-cycle! [(form Code) (helpers Code) (path Code) (complete (ptr Code))] (-> i64)
+  (when (p/code-list? form)
+    (let [decl (p/code-decl form)]
+      (when (helper? decl helpers)
+        (visit-helper! (p/code-nth decl 3) helpers path complete) 0))
+    (for [i 0 (p/code-count form)]
+      (helper-cycle! (p/code-nth form i) helpers path complete))) 0)
+(defn helper-body-cycles! [(form Code) (helpers Code) (path Code) (complete (ptr Code))] (-> i64)
+  (let [(mut at) -1]
+    (for [i 2 (p/code-count form)]
+      (when (p/code-vector? (p/code-nth form i)) (set! at (+ i 2)) (break)))
+    (when (>= (load at) 0)
+      (for [i (load at) (p/code-count form)]
+        (helper-cycle! (p/code-nth form i) helpers path complete)))) 0)
+(defn check [(modules Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [mi 0 (p/code-count modules)]
+      (let [m (p/code-nth modules mi)]
+        (for [fi 1 (p/code-count m)]
+          (when (selected? (p/code-nth m fi)) (p/code-list-push! out (p/code-nth m fi)) 0))))
+    (let [helpers (p/code-list-done out) (mut complete) '()]
+      (for [i 0 (p/code-count helpers)]
+        (function! (p/code-nth helpers i) helpers)
+        (helper-body-cycles! (p/code-nth helpers i) helpers '() (mut complete)))))
+  `(do ~@modules))

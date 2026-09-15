@@ -22,7 +22,7 @@ This first barrier closes all application roots. Per-layout admission and foreig
 
 ## Verified
 
-The native suite has 46 passing tests. Migration contracts cover:
+The native suite has 47 passing tests. Migration contracts cover:
 
 - Reordered fields and a new default, with stable object identity.
 - Two-object cycles and references from an unchanged nominal type.

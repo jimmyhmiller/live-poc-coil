@@ -4,7 +4,7 @@ A native live-programming session with a real Paper window. Concrete function bo
 
 ## Build and run
 
-Requires macOS, the Paper integration worktree at `../paper-test/.worktrees/live-poc`, and Coil at `e94a4eb` from branch `live-poc-jit-project`. The compiler is installed globally on the development machine. `Coil.toml` declares the Paper dependency and native frameworks.
+Requires macOS, the Paper integration worktree at `../paper-test/.worktrees/live-poc`, and Coil at `3b12e52` from branch `live-poc-jit-project`. The compiler is installed globally on the development machine. `Coil.toml` declares the Paper dependency and native frameworks.
 
 ```sh
 coil build src/main.coil -o build/live-poc
@@ -63,7 +63,7 @@ python3 scripts/benchmark.py --count 1000 --warmup 20 \
 
 The latest 1,000-edit color run passed with median 44.9 ms, p99 52.8 ms and maximum 53.1 ms; zero misses including clock uncertainty. Every frame reported the app active and window visible. The measured Paper render was 1280 × 960 at scale 2 with a 16.67 ms frame duration. [Raw measurements and limits](docs/measurements/README.md) include Python and actual unsaved Emacs runs.
 
-Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 46 passing tests, all three protocol scripts pass, and three Emacs integration tests pass.
+Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 47 passing tests, all three protocol scripts pass, and three Emacs integration tests pass.
 
 ## Remaining scope
 
