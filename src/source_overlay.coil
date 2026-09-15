@@ -1,0 +1,116 @@
+(module live-poc-coil.source-overlay)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.reader" :as reader)
+(import "coil.slice" :as slice)
+(import "coil.str" :as str)
+(import "live-poc-coil.source" :as source)
+
+;;; Pending schema source is an owned snapshot, independent of both the latest
+;;; editor text and the compiler's last rejected arena. Plans allocate before
+;;; compilation. Acceptance/rejection only swaps an already-owned snapshot.
+(defstruct Item [(module (slice u8)) (kind (slice u8)) (name (slice u8))
+  (text (slice u8)) (persistent bool)])
+(defstruct Plan [(submit (slice u8)) (accepted (slice u8)) (failed (slice u8))
+  (status i64) (active bool) (items (slice Item))])
+(defn same-key? [(left Item) (right Item)] (-> bool)
+  (and (= (.module left) (.module right))
+    (and (= (.kind left) (.kind right)) (= (.name left) (.name right)))))
+(defn includes-module? [(items (slice Item)) (module (slice u8))] (-> bool)
+  (block :found
+    (for [i 0 (slice/slice-len items)]
+      (let [item (slice/slice-get items i)]
+        (when (= (.module item) module) (break :found true)))) false))
+(defn includes-key? [(items (slice Item)) (item Item)] (-> bool)
+  (block :found
+    (for [i 0 (slice/slice-len items)]
+      (when (same-key? (slice/slice-get items i) item) (break :found true))) false))
+(defn parse! [(allocator (dyn a/Allocator)) (text (slice u8))
+  (items (ptr (al/ArrayList Item))) (schema (ptr bool))] (-> bool)
+  (match (reader/read-all allocator text 0)
+    (Err [_] false)
+    (Ok [forms]
+      (let [(mut module) ""]
+        (for [i 0 (al/al-len (load forms))]
+          (let [form (al/al-elem [reader/Sexp] forms i)
+                bytes (slice/subslice text (.lo form) (.hi form))
+                (mut kind) "" (mut name) bytes (mut persistent) false]
+            (when (and (reader/sexp-list? form) (> (reader/sexp-count form) 0))
+              (let [head (reader/sexp-nth form 0)]
+                (when (reader/sexp-sym? head)
+                  (set! kind (reader/sexp-sym head))
+                  (set! persistent (source/top-level? form))
+                  (when (or (= (load kind) "live-poc-coil.meta/evaluate") (= (load kind) "module"))
+                    (set! persistent false) 0)
+                  (when (and (>= (reader/sexp-count form) 2) (reader/sexp-sym? (reader/sexp-nth form 1)))
+                    (when (or (source/declaration? (load kind)) (= (load kind) "const"))
+                      (set! name (source/declaration-name allocator form)) 0)
+                    (when (= (load kind) "module")
+                      (set! module (reader/sexp-sym (reader/sexp-nth form 1))) 0))
+                  (when (or (= (load kind) "letonce") (= (load kind) "migrate"))
+                    (store! schema true) 0)
+                  (when (= (load kind) "defstruct")
+                    (for [j 2 (reader/sexp-count form)]
+                      (when (reader/sexp-kw? (reader/sexp-nth form j))
+                        (when (= (reader/sexp-kw (reader/sexp-nth form j)) "live/state")
+                          (store! schema true) 0)))) 0)))
+            (al/al-push! items (Item :module (load module) :kind (load kind)
+              :name (load name) :text bytes :persistent (load persistent))))) true))))
+(defn render [(allocator (dyn a/Allocator)) (items (slice Item))] (-> (slice u8))
+  (let [(mut out) (str/sb-new allocator) (mut module) "" (mut first) true]
+    (for [i 0 (slice/slice-len items)]
+      (let [item (slice/slice-get items i)]
+        (unless (= (.kind item) "module")
+          (when (or (load first) (!= (load module) (.module item)))
+            (when (!= (.module item) "")
+              (str/sb-push-str! (mut out) "(module ")
+              (str/sb-push-str! (mut out) (.module item))
+              (str/sb-push-str! (mut out) ")\n"))
+            (set! module (.module item)) (set! first false))
+          (str/sb-push-str! (mut out) (.text item))
+          (str/sb-push-str! (mut out) "\n"))))
+    (str/sb-str (load out))))
+(defn owned-copy! [(text (slice u8)) (out (ptr (slice u8)))] (-> bool)
+  (if (= (slice/slice-len text) 0) (do (store! out "") true)
+    (match (a/alloc [u8] (a/malloc-allocator) (slice/slice-len text))
+      (None [] false)
+      (Some [memory]
+        (for [i 0 (slice/slice-len text)]
+          (slice/slice-set! memory i (slice/slice-get text i)))
+        (store! out memory) true))))
+(defn prepare [(allocator (dyn a/Allocator)) (pending (slice u8)) (incoming (slice u8))] (-> Plan)
+  (let [(mut old) (al/al-new [Item] allocator) (mut next) (al/al-new [Item] allocator)
+        (mut schema) false plan (p/alloc-stack Plan)]
+    (store! plan (p/zeroed Plan)) (set! (.submit plan) incoming)
+    (block :done
+      (unless (parse! allocator incoming (mut next) (mut schema)) (break :done (load plan)))
+      (when (and (= pending "") (not (load schema))) (break :done (load plan)))
+      (assert (parse! allocator pending (mut old) (mut schema)))
+      (let [(mut submit) (al/al-new [Item] allocator) (mut accepted) (al/al-new [Item] allocator)
+            (mut failed) (al/al-new [Item] allocator)]
+        (for [i 0 (al/al-len (load old))]
+          (let [item (al/al-get (load old) i) touched (includes-module? (al/al-slice (load next)) (.module item))]
+            (unless (includes-key? (al/al-slice (load next)) item)
+              (when (.persistent item) (al/al-push! (mut failed) item))
+              (when touched (al/al-push! (mut submit) item)))
+            (when (and (not touched) (.persistent item)) (al/al-push! (mut accepted) item))))
+        (for [i 0 (al/al-len (load next))]
+          (let [item (al/al-get (load next) i)]
+            (al/al-push! (mut submit) item)
+            (when (.persistent item) (al/al-push! (mut failed) item))))
+        (set! (.items plan) (al/al-slice (load submit)))
+        (set! (.submit plan) (render allocator (.items plan)))
+        (set! (.active plan) true)
+        (unless (and (owned-copy! (render allocator (al/al-slice (load accepted))) (field plan accepted))
+                     (owned-copy! (render allocator (al/al-slice (load failed))) (field plan failed)))
+          (set! (.status plan) -4) 0)
+        (load plan)))))
+(defn apply! [(pending (ptr (slice u8))) (plan (ptr Plan)) (accepted bool)] (-> i64)
+  (assert (and (.active plan) (= (.status plan) 0)))
+  (let [next (if accepted (field plan accepted) (field plan failed)) old (load pending)]
+    (store! pending (load next)) (store! next old)) 0)
+(defn clear! [(plan (ptr Plan))] (-> i64)
+  (a/free (a/malloc-allocator) (.accepted plan))
+  (a/free (a/malloc-allocator) (.failed plan))
+  (set! (.accepted plan) "") (set! (.failed plan) "") 0)

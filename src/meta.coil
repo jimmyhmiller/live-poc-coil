@@ -6,3 +6,6 @@
 
 (import "live-poc-coil.purity" :as purity :reexport)
 (checker purity/check)
+
+(import "live-poc-coil.schema-lower" :as schemas)
+(transform schemas/expanded :phase after-expand)

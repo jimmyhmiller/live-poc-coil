@@ -35,7 +35,16 @@
     -1))
 (defn declaration? [(kind (slice u8))] (-> bool)
   (or (= kind "defn") (or (= kind "defn*")
-    (or (= kind "def") (or (= kind "defstruct") (= kind "defsum"))))))
+    (or (= kind "migrate") (or (= kind "def") (or (= kind "letonce") (or (= kind "defstruct") (= kind "defsum"))))))))
+(defn declaration-name [(allocator (dyn a/Allocator)) (form (ptr reader/Sexp))] (-> (slice u8))
+  (let [name (reader/sexp-sym (reader/sexp-nth form 1))]
+    (if (and (reader/sexp-sym-is (reader/sexp-nth form 0) "migrate")
+             (and (>= (reader/sexp-count form) 3) (reader/sexp-sym? (reader/sexp-nth form 2))))
+      (let [(mut out) (str/sb-new allocator)]
+        (str/sb-push-str! (mut out) name)
+        (str/sb-push-str! (mut out) "/")
+        (str/sb-push-str! (mut out) (reader/sexp-sym (reader/sexp-nth form 2)))
+        (str/sb-str (load out))) name)))
 (defn record-form! [(ledger (ptr Ledger)) (module (slice u8)) (kind (slice u8))
   (name (slice u8)) (text (slice u8)) (lo i64) (hi i64)] (-> i64)
   (let [known (find ledger module kind name)
@@ -72,7 +81,7 @@
                       (cond
                         (= kind "module") (do (set! module (reader/sexp-sym name)) 0)
                         (declaration? kind)
-                          (record-form! ledger (load module) kind (reader/sexp-sym name)
+                          (record-form! ledger (load module) kind (declaration-name (scratch/scratch-allocator arena) f)
                             (slice/subslice text (.lo f) (.hi f)) (.lo f) (.hi f))
                         true 0))))))))))
     (scratch/scratch-close! arena))

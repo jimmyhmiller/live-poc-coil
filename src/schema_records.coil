@@ -1,0 +1,100 @@
+(module live-poc-coil.schema-records)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.policy-state" :as policy)
+(import "live-poc-coil.syntax-rewrite" :as syntax)
+
+(defannotation :live/state bool)
+;;; Schema record: (module authored-name logical-id version physical-name fields source).
+;;; Root record: (module authored-name root-id logical-id initializer-source).
+(defn lookup [(records Code) (module Code) (name Code)] (-> i64)
+  (block :found
+    (for [i 0 (p/code-count records)]
+      (let [record (p/code-nth records i)]
+        (when (and (p/code-eq (p/code-nth record 0) module)
+          (p/bound-identifier=? (p/code-nth record 1) name)) (break :found i))))
+    -1))
+(defn replace [(records Code) (index i64) (next Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 (p/code-count records)]
+      (p/code-list-push! out (if (= i index) next (p/code-nth records i))))
+    (when (= index (p/code-count records)) (p/code-list-push! out next) 0)
+    (p/code-list-done out)))
+(defn managed? [(form Code)] (-> bool)
+  (block :found
+    (unless (syntax/head? form `defstruct) (break :found false))
+    (for [i 2 (p/code-count form)]
+      (when (p/code-vector? (p/code-nth form i)) (break :found false))
+      (when (and (p/code-eq (p/code-nth form i) `:live/state)
+        (< (+ i 1) (p/code-count form)))
+        (break :found (p/code-eq (p/code-nth form (+ i 1)) `true))))
+    false))
+(defn fields [(form Code)] (-> Code)
+  (unless (and (p/code-list? form) (>= (p/code-count form) 3))
+    (p/error "managed schema requires a named record and field vector") 0)
+  (let [fields (p/code-nth form (- (p/code-count form) 1))]
+    (unless (p/code-vector? fields) (p/error "managed schema requires a field vector") 0)
+    (for [i 2 (- (p/code-count form) 1)]
+      (when (p/code-vector? (p/code-nth form i))
+        (p/error "managed generic schemas require a generic value policy") 0))
+    (for [i 0 (p/code-count fields)]
+      (let [field (p/code-nth fields i)]
+        (unless (and (p/code-list? field)
+          (and (or (= (p/code-count field) 2) (= (p/code-count field) 3))
+               (p/code-sym? (p/code-nth field 0))))
+          (p/error "managed fields require (name Type) or (name Type default)") 0)))
+    fields))
+(defn propose! [(state (ptr Code)) (module Code) (form Code)] (-> i64)
+  (let [items (policy/schemas (load state)) name (p/code-nth form 1)
+        known (lookup items module name) fields (fields form)
+        index (if (< known 0) (p/code-count items) known)]
+    (block :done
+      (when (>= known 0)
+        (when (p/code-eq (p/code-nth (p/code-nth items known) 6) form) (break :done -1)))
+      (let [logical (if (< known 0) (+ index 1) (p/code-int (p/code-nth (p/code-nth items known) 2)))
+            version (if (< known 0) 1 (+ (p/code-int (p/code-nth (p/code-nth items known) 3)) 1))
+            prepared-fields (p/code-list-new)
+            physical (p/fresh-identifier (p/code-str name))]
+        (for [i 0 (p/code-count fields)]
+          (let [field (p/code-nth fields i)]
+            (p/code-list-push! prepared-fields
+              (if (= (p/code-count field) 3)
+                `(~@field ~(p/fresh-identifier "state-default")) field))))
+        (store! state (policy/with-state (load state)
+          (replace items index `(~module ~name ~logical ~version ~physical
+            [~@(p/code-list-done prepared-fields)] ~form
+            ~(if (and (>= known 0) (> (p/code-count (p/code-nth items known)) 7))
+              (p/code-nth (p/code-nth items known) 7) '())))
+          (policy/roots (load state)))))
+      index)))
+(defn physical-definition [(record Code)] (-> Code)
+  (let [source (p/code-nth record 6) fields (p/code-nth record 5)
+        options (p/code-list-new) clean (p/code-list-new) (mut skip) false]
+    (for [i 2 (- (p/code-count source) 1)]
+      (if (load skip) (do (set! skip false) 0)
+        (if (p/code-eq (p/code-nth source i) `:live/state)
+          (do (set! skip true) 0)
+          (do (p/code-list-push! options (p/code-nth source i)) 0))))
+    (for [i 0 (p/code-count fields)]
+      (let [field (p/code-nth fields i)]
+        (p/code-list-push! clean `(~(p/code-nth field 0) ~(p/code-nth field 1)))))
+    `(defstruct ~(p/code-nth record 4) ~@(p/code-list-done options) [~@(p/code-list-done clean)])))
+(defn root? [(form Code)] (-> bool) (syntax/head? form `letonce))
+(defn propose-root! [(state (ptr Code)) (module Code) (form Code)] (-> i64)
+  (unless (and (= (p/code-count form) 3) (p/code-sym? (p/code-nth form 1)))
+    (p/error "managed root requires (letonce name (ManagedType ...))") 0)
+  (let [name (p/code-nth form 1) initializer (p/code-nth form 2)
+        roots (policy/roots (load state)) schemas (policy/schemas (load state))]
+    (unless (and (p/code-list? initializer) (and (> (p/code-count initializer) 0)
+      (p/code-sym? (p/code-nth initializer 0))))
+      (p/error "managed root requires an explicit managed constructor") 0)
+    (let [type (lookup schemas module (p/code-nth initializer 0))
+          known (lookup roots module name) index (if (< known 0) (p/code-count roots) known)]
+      (when (< type 0) (p/error "managed root requires a known managed constructor in its module") 0)
+      (let [schema (p/code-nth schemas type) logical (p/code-nth schema 2)
+            id (if (< known 0) (+ index 1) (p/code-int (p/code-nth (p/code-nth roots known) 2)))]
+        (when (>= known 0)
+          (unless (p/code-eq (p/code-nth (p/code-nth roots known) 3) logical)
+            (p/error "an existing root cannot change nominal identity") 0))
+        (store! state (policy/with-state (load state) schemas
+          (replace roots index `(~module ~name ~id ~logical ~initializer)))))
+      index)))

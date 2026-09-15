@@ -97,6 +97,42 @@
     (for [i (+ (load at) 1) (p/code-count form)]
       (p/code-list-push! out (rewrite (p/code-nth form i) mapping (load scope))))
     (rebuild form (p/code-list-done out))))
+(defn keyword [(name Code)] (-> Code)
+  ; Keywords are field-label data, not identifiers. The reader constructs a
+  ; keyword node; no authored expression or binding is serialized here.
+  (let [parsed (p/code-read (p/code-str ":" (p/code-str name)) '(reader-config))]
+    (unless (and (= (p/code-count parsed) 2) (p/code-keyword? (p/code-nth parsed 1)))
+      (p/error "field name cannot be represented as a constructor keyword") 0)
+    (p/code-nth parsed 1)))
+(defn constructor-record [(form Code) (mapping Code) (bound Code)] (-> Code)
+  (block :found
+    (when (or (p/code-vector? form) (not (p/code-sym? (p/code-nth form 0)))) (break :found '()))
+    (when (named? bound (p/code-nth form 0)) (break :found '()))
+    (for [i 0 (p/code-count mapping)]
+      (let [row (p/code-nth mapping i)]
+        (when (and (>= (p/code-count row) 3)
+          (p/bound-identifier=? (p/code-nth row 0) (p/code-nth form 0))) (break :found row))))
+    '()))
+(defn constructor [(form Code) (record Code) (mapping Code) (bound Code)] (-> Code)
+  (let [out (p/code-list-new) fields (p/code-nth record 2)]
+    (unless (= (% (- (p/code-count form) 1) 2) 0)
+      (p/error "managed record constructors require field/value pairs") 0)
+    (for [i 0 (/ (- (p/code-count form) 1) 2)]
+      (unless (p/code-keyword? (p/code-nth form (+ (* i 2) 1)))
+        (p/error "managed record constructors require named fields") 0))
+    (p/code-list-push! out (p/code-nth record 1))
+    (for [i 1 (p/code-count form)]
+      (p/code-list-push! out (rewrite (p/code-nth form i) mapping bound)))
+    (for [i 0 (p/code-count fields)]
+      (let [field (p/code-nth fields i) label (keyword (p/code-nth field 0)) (mut present) false]
+        (for [j 0 (/ (- (p/code-count form) 1) 2)]
+          (when (p/code-eq (p/code-nth form (+ (* j 2) 1)) label) (set! present true) 0))
+        (when (and (not (load present)) (>= (p/code-count field) 3))
+          (p/code-list-push! out label)
+          (p/code-list-push! out
+            (if (>= (p/code-count field) 4) `(~(p/code-nth field 3))
+              (rewrite (p/code-nth field 2) mapping bound))) 0)))
+    (rebuild form (p/code-list-done out))))
 (defn rewrite [(form Code) (mapping Code) (bound Code)] (-> Code)
   (cond (p/code-sym? form) (reference form mapping bound)
         (not (p/code-list? form)) form
@@ -107,4 +143,7 @@
         (or (head? form `fn*) (or (head? form `defn*) (head? form `defn))) (function form mapping bound)
         (head? form `field)
           (rebuild form `(field ~(rewrite (p/code-nth form 1) mapping bound) ~(p/code-nth form 2)))
-        :else (sequence form 0 mapping bound)))
+        :else
+          (let [record (constructor-record form mapping bound)]
+            (if (> (p/code-count record) 0) (constructor form record mapping bound)
+              (sequence form 0 mapping bound)))))

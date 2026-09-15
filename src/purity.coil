@@ -1,6 +1,7 @@
 (module live-poc-coil.purity)
 (import "coil.primitive" :as p)
 (import "live-poc-coil.syntax-rewrite" :as syntax)
+(import "live-poc-coil.policy-state" :as policy)
 
 ;;; Pure defaults and field transitions are value computations. This checked
 ;;; subset admits plain records/sums, immutable locals and checked helpers.
@@ -43,6 +44,23 @@
     false))
 (defn declaration? [(decl Code)] (-> bool)
   (and (syntax/head? decl `decl) (>= (p/code-count decl) 4)))
+(defn accepted-default? [(decl Code)] (-> bool)
+  ; Accepted schema metadata certifies these exact generated helpers: their
+  ; bodies and closed helper dependencies passed this checker before commit.
+  ; No user annotation or display-name match grants this authority.
+  (block :found
+    (unless (declaration? decl) (break :found false))
+    (let [schemas (policy/schemas (policy/current))]
+      (for [si 0 (p/code-count schemas)]
+        (let [fields (p/code-nth (p/code-nth schemas si) 5)]
+          (for [fi 0 (p/code-count fields)]
+            (let [field (p/code-nth fields fi)]
+              (when (= (p/code-count field) 4)
+                (let [other (p/code-decl (p/code-nth field 3))]
+                  (when (and (declaration? other)
+                    (p/code-eq (p/code-nth decl 3) (p/code-nth other 3)))
+                    (break :found true))) 0))))))
+    false))
 (defn helper? [(decl Code) (helpers Code)] (-> bool)
   (block :found
     (unless (declaration? decl) (break :found false))
@@ -93,7 +111,7 @@
     :else
       (let [decl (p/code-decl form)]
         (cond
-          (helper? decl helpers) (arguments! form 1 bound helpers)
+          (or (helper? decl helpers) (accepted-default? decl)) (arguments! form 1 bound helpers)
           (and (declaration? decl)
             (or (p/code-eq (p/code-nth decl 2) `struct) (p/code-eq (p/code-nth decl 2) `sum)))
             (do
