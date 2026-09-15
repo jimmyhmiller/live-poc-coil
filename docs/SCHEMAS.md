@@ -42,4 +42,4 @@ The current native tests cover stable roots, repeated initializers, added/reorde
 
 ## Work still in progress
 
-Pending layout conditions currently use a global admission barrier. Selective state dependencies are next. Nested ownership policies, managed sums, generic schemas, schema metadata retirement, explicit state reset and the moving Paper acceptance scenario are not complete. The complete contract remains in [PLAN.md](PLAN.md).
+Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Nested ownership policies, managed sums, generic schemas, schema metadata retirement, explicit state reset and the moving Paper acceptance scenario are not complete. The complete contract remains in [PLAN.md](PLAN.md).

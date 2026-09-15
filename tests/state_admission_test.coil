@@ -1,0 +1,85 @@
+(module live-poc-coil.state-admission-test)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "live-poc-coil.runtime" :as rt)
+(import "live-poc-coil.session" :as session)
+(defn target [] (-> i64) 42)
+(deftest schema-conditions-follow-call-closure-and-retire-stale-dependencies
+  (let [runtime (p/alloc-stack rt/Runtime) address (p/cast (ptr i8) (p/fnptr-of target))]
+    (assert (= (rt/init! runtime) 0))
+    (let [view (rt/clone-current! runtime)]
+      (for [i 0 5] (assert (= (rt/stage! view i address) 0)))
+      (rt/dependency! view 0 1) (rt/dependency! view 1 0)
+      (assert (= (rt/state-dependency! view 1 77) 0))
+      (rt/opaque! view 3) (rt/dependency! view 4 3)
+      (rt/publish! runtime view))
+    (assert (= (rt/reserve-state-conditions! runtime 1) 0))
+    (rt/set-state-condition! runtime 77 -3)
+    (for [id 0 5]
+      (let [view (rt/enter-root! runtime id)]
+        (if (= id 2)
+          (do (assert (!= (p/cast i64 view) 0)) (rt/leave! runtime))
+          (assert (= (p/cast i64 view) 0)))))
+    ; Replacing the callee removes its state edge and the inherited caller edge.
+    (let [view (rt/clone-current! runtime)]
+      (rt/stage! view 1 address) (rt/dependency! view 1 0)
+      (rt/publish! runtime view))
+    (assert (!= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+    (rt/leave! runtime)
+    (assert (= (p/cast i64 (rt/enter-root! runtime 4)) 0))
+    (rt/set-state-condition! runtime 77 0)
+    (assert (!= (p/cast i64 (rt/enter-root! runtime 4)) 0))
+    (rt/leave! runtime)
+    (assert (rt/close! runtime)) (rt/collect-views! runtime) (rt/destroy! runtime)))
+
+(deftest missing-schema-transition-pauses-only-dependent-native-roots
+  (assert (= (session/init!) 0))
+  (assert (= (session/submit! "(module selective-state) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State :live/state true [(visible bool true) (value i64 7)]) (defstruct Other :live/state true [(value i64 19)]) (letonce world (State :value 42)) (letonce other (Other)) (defn affected [] (-> i64) (.value world)) (defn unaffected [] (-> i64) (.value other)) (defn caller [] (-> i64) (affected))") 0))
+  (assert (!= (session/submit-deferred! "(module selective-state) (defstruct State :live/state true [(visible Visibility (Visible)) (value i64 7)])") 0))
+  (let [runtime (field (session/instance) runtime)]
+    (assert (not (.layout-closed runtime)))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 2)) 0))
+    (assert (!= (p/cast i64 (rt/enter-root! runtime 1)) 0))
+    (assert (= (p/call-ptr (p/cast (fnptr c [] i64) (rt/resolve runtime 1))) 19))
+    (rt/leave! runtime)
+    (assert (= (session/submit! "(module selective-state) (migrate State visible old (if old (Visible) (Hidden)))") 0))
+    (assert (!= (p/cast i64 (rt/enter-root! runtime 2)) 0))
+    (assert (= (p/call-ptr (p/cast (fnptr c [] i64) (rt/resolve runtime 2))) 42))
+    (rt/leave! runtime))
+  (assert (= (session/close!) 0)))
+
+(defstruct ConditionAllocator [(remaining i64) (live i64)])
+(impl a/Allocator ConditionAllocator
+  (allocate [(self (ptr ConditionAllocator)) (request (ref a/AllocRequest))] (-> (Option (ptr i8)))
+    (if (= (.remaining self) 0) (None)
+      (do
+        (when (> (.remaining self) 0) (set! (.remaining self) (- (.remaining self) 1)))
+        (match (a/malloc-allocate request)
+          (None [] (None))
+          (Some [memory] (set! (.live self) (+ (.live self) 1)) (Some memory))))))
+  (resize [(self (ptr ConditionAllocator)) (memory (ptr i8)) (old (ref a/AllocRequest)) (next (ref a/AllocRequest))] (-> bool) false)
+  (remap [(self (ptr ConditionAllocator)) (memory (ptr i8)) (old (ref a/AllocRequest)) (next (ref a/AllocRequest))] (-> (Option (ptr i8))) (None))
+  (deallocate [(self (ptr ConditionAllocator)) (memory (ptr i8)) (request (ref a/AllocRequest))] (-> i64)
+    (when (!= (p/cast i64 memory) 0) (set! (.live self) (- (.live self) 1)))
+    (p/free memory)))
+
+(deftest condition-allocation-failure-remains-blocked-until-the-complete-repair
+  (let [allocator (p/alloc-stack ConditionAllocator)]
+    (store! allocator (ConditionAllocator :remaining 0 :live 0))
+    (assert (= (session/init!) 0))
+    (let [runtime (field (session/instance) runtime)]
+      (set! (.alc (field runtime state-conditions)) (p/make-dyn a/Allocator allocator))
+      (assert (!= (session/submit-deferred! "(module failed-state) (import \"live-poc-coil.meta\") (defstruct State :live/state true [(value i64 42)]) (letonce world (State)) (defn value [] (-> i64) (.value world))") 0))
+      (assert (= (.global-state-condition runtime) -4))
+      (set! (.remaining allocator) -1)
+      (assert (= (session/submit! "(module independent-state) (import \"live-poc-coil.meta\") (defstruct Other :live/state true [(value i64 19)]) (letonce other (Other)) (defn value [] (-> i64) (.value other))") 0))
+      (assert (= (.global-state-condition runtime) -4))
+      (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+      (assert (= (session/submit! "(module failed-state) (letonce world (State))") 0))
+      (assert (= (.global-state-condition runtime) 0))
+      (assert (!= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+      (assert (= (p/call-ptr (p/cast (fnptr c [] i64) (rt/resolve runtime 0))) 19))
+      (rt/leave! runtime))
+    (assert (= (session/close!) 0))
+    (assert (= (.live allocator) 0))))

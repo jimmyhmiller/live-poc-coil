@@ -9,6 +9,7 @@
 (defn describe [B H I] [(id i64) (name (slice u8)) (binding B)
   (helper H) (implementation I) (condition i64)] (-> i64) 0)
 (extern lpc_stage_dependency :cc c [i64 i64] (-> i64))
+(extern lpc_stage_state_dependency :cc c [i64 i64] (-> i64))
 (extern lpc_stage_opaque :cc c [i64] (-> i64))
 (extern lpc_stage_blocked :cc c [i64 i64] (-> i64))
 (extern lpc_stage_source :cc c [(ptr u8) i64 (ptr u8) i64 i64 (ptr u8) i64] (-> i64))
@@ -84,8 +85,22 @@
       (for [i 0 (p/code-count heads)]
         (when (p/code-eq head (p/code-nth heads i)) (break :found true)))
       false)))
+(defn state-borrow? [(form Code)] (-> bool)
+  (block :done
+    (unless (and (p/code-list? form) (= (p/code-count form) 4)) (break :done false))
+    (let [decl (p/code-decl form)]
+      (unless (and (declaration? decl)
+        (p/code-eq (p/code-nth decl 3) `live-poc-coil.managed-api.lpc_root_payload))
+        (break :done false)))
+    (for [i 1 4]
+      (unless (p/code-int? (p/code-nth form i)) (break :done false))
+      (when (<= (p/code-int (p/code-nth form i)) 0) (break :done false))) true))
+(defn state-dependencies! [(form Code) (out CodeBuilder)] (-> i64)
+  (when (state-borrow? form) (p/code-list-push! out (p/code-nth form 2)) 0)
+  (when (p/code-list? form)
+    (for [i 0 (p/code-count form)] (state-dependencies! (p/code-nth form i) out))) 0)
 (defn dependencies! [(form Code) (registry Code) (out CodeBuilder)] (-> bool)
-  (let [decl (p/code-decl form) (mut known) false (mut opaque) false]
+  (let [decl (p/code-decl form) (mut known) (state-borrow? form) (mut opaque) false]
     (when (declaration? decl)
       (for [i 0 (p/code-count registry)]
         (let [item (p/code-nth registry i)]
@@ -108,7 +123,7 @@
                    (and (not (syntax-head? head)) (not (p/code-eq (p/type-of form) `:unknown))))
           (set! opaque true))))
     (when (or (p/code-list? form) (p/code-vector? form))
-      (for [i 0 (p/code-count form)]
+      (for [i (if (state-borrow? form) 1 0) (p/code-count form)]
         (when (dependencies! (p/code-nth form i) registry out) (set! opaque true))) 0)
     (load opaque)))
 (defn rewrite [(form Code) (modules Code) (registry Code) (candidate Code)] (-> Code)
@@ -118,7 +133,7 @@
                       ~(p/code-nth form 2) ~(p/code-nth form 6)
                       ~(policy/source-text candidate (p/code-nth binding 1) (p/code-nth form 3)))]
     (if (p/code-eq (p/code-nth form 6) `0)
-      (let [dependencies (p/code-list-new) calls (p/code-list-new)
+      (let [dependencies (p/code-list-new) states (p/code-list-new) calls (p/code-list-new)
             id (p/code-nth form 1) implementation (implementation modules form) (mut opaque) false]
         (let [(mut body-start) -1]
           (for [i 2 (p/code-count implementation)]
@@ -126,10 +141,14 @@
               (set! body-start (+ i 2)) (break)))
           (assert (>= (load body-start) 0))
           (for [i (load body-start) (p/code-count implementation)]
-            (when (dependencies! (p/code-nth implementation i) registry dependencies) (set! opaque true))))
+            (when (dependencies! (p/code-nth implementation i) registry dependencies) (set! opaque true))
+            (state-dependencies! (p/code-nth implementation i) states)))
         (let [ids (p/code-list-done dependencies)]
           (for [i 0 (p/code-count ids)]
             (p/code-list-push! calls `(lpc_stage_dependency ~id ~(p/code-nth ids i)))))
+        (let [ids (p/code-list-done states)]
+          (for [i 0 (p/code-count ids)]
+            (p/code-list-push! calls `(lpc_stage_state_dependency ~id ~(p/code-nth ids i)))))
         (when (load opaque) (p/code-list-push! calls `(lpc_stage_opaque ~id)) 0)
         `(do (~(p/code-nth (p/code-nth form 4) 1) ~(p/code-nth form 5))
              ~@(p/code-list-done calls) ~outcome 0))

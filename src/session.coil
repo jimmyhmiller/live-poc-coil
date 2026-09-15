@@ -54,6 +54,12 @@
   (rt/dependency! (.staging (instance)) from to))
 (export-c [stage-dependency :as "lpc_stage_dependency"])
 
+(defn stage-state-dependency [(from i64) (logical i64)] (-> i64)
+  (let [s (instance) status (rt/state-dependency! (.staging s) from logical)]
+    (when (and (!= status 0) (= (.preflight-status s) 0))
+      (set! (.preflight-status s) status)) status))
+(export-c [stage-state-dependency :as "lpc_stage_state_dependency"])
+
 (defn stage-opaque [(id i64)] (-> i64)
   (assert (!= (p/cast i64 (.staging (instance))) 0))
   (rt/opaque! (.staging (instance)) id))
@@ -88,11 +94,14 @@
     (if (cancelled? (.cancel s))
       (set! (.preflight-status s) 3)
       (do
-        (set! (.preflight-status s) (managed/prepare!))
+        (when (= (.preflight-status s) 0)
+          (set! (.preflight-status s) (managed/prepare!)))
         (when (= (.preflight-status s) 0)
           (set! (.preflight-status s) (jit/jit-generation-reserve-tokens! (field s compiler) 1)))
         (when (= (.preflight-status s) 0)
           (rt/propagate! (.staging s))
+          (set! (.preflight-status s) (rt/propagate-state! (.staging s))))
+        (when (= (.preflight-status s) 0)
           (set! (.preflight-status s) (rt/reserve-publication! (field s runtime))))
         (when (= (.preflight-status s) 0) (set! (.preflight-status s) (metrics/reserve!)))
         (when (= (.preflight-status s) 0)
@@ -251,7 +260,6 @@
       (source/replace! (field s result) "")
       (set! (.result-overflow s) false)
       (set! (.evaluation s) (p/cast (ptr i8) 0))
-      (managed/begin! cancel deferred)
       (set! (.cancel s) cancel)
       (set! (.preflight-status s) 0)
       (set! (.len (field s outcomes)) 0)
@@ -260,6 +268,7 @@
       (metadata-unlock!)
       (set! (.staging s) candidate)
       (store! overlay-plan (overlay/prepare (scratch/scratch-allocator input-arena) (.desired-schema s) source))
+      (managed/begin! cancel deferred (and (.active overlay-plan) (= (.accepted overlay-plan) "")))
       (let [prepared (source/prepare (scratch/scratch-allocator input-arena) (.submit overlay-plan))]
         (set! status (list/reserve! (field s outcomes) (+ (al/al-len (.forms (.sources s))) (slice/slice-len (.items overlay-plan)))))
         (when (!= (.status overlay-plan) 0) (set! status (.status overlay-plan)))

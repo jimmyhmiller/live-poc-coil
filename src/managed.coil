@@ -15,7 +15,7 @@
   (targets (al/ArrayList (ptr graph/Schema))) (owners (al/ArrayList Owner))
   (pending-owners (al/ArrayList (ptr graph/Schema)))
   (constructible (al/ArrayList (ptr graph/Schema))) (cancel (ptr i64)) (active bool) (deferred bool)
-  (failure i64) (prior-closed bool) (prior-condition i64)
+  (failure i64) (affected (al/ArrayList i64)) (condition-reserved bool) (repair-all bool) (prior-closed bool) (prior-condition i64)
   (phase i64) (condition i64) (epoch i64) (initialized bool)])
 (defn state [] (-> (ptr State)) (p/alloc-static State))
 (defn init! [(runtime (ptr rt/Runtime))] (-> i64)
@@ -25,16 +25,18 @@
     (set! (.runtime s) runtime)
     (graph/init! (field s heap) (a/malloc-allocator))
     (set! (.targets s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
+    (set! (.affected s) (al/al-new [i64] (a/malloc-allocator)))
     (set! (.owners s) (al/al-new [Owner] (a/malloc-allocator)))
     (set! (.pending-owners s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
     (set! (.constructible s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
     (set! (.initialized s) true)) 0)
-(defn begin! [(cancel (ptr i64)) (deferred bool)] (-> i64)
+(defn begin! [(cancel (ptr i64)) (deferred bool) (repair-all bool)] (-> i64)
   (let [s (state)]
     (assert (.initialized s)) (assert (= (.phase (field s heap)) 0))
     (set! (.point s) (graph/savepoint (field s heap)))
     (set! (.len (field s targets)) 0)
-    (set! (.cancel s) cancel) (set! (.deferred s) deferred)
+    (set! (.len (field s affected)) 0) (set! (.condition-reserved s) true)
+    (set! (.cancel s) cancel) (set! (.deferred s) deferred) (set! (.repair-all s) repair-all)
     (set! (.active s) false) (set! (.failure s) 0) (set! (.len (field s pending-owners)) 0)
     (set! (.prior-condition s) (atomic/atomic-load (field s condition)))
     (rt/lock! (.runtime s))
@@ -58,9 +60,23 @@
       (let [item (al/al-get (.schemas (field (state) heap)) i)]
         (when (and (= (.logical item) logical) (= (.version item) version)) (break :done item))))
     (p/cast (ptr graph/Schema) 0)))
+(defn remember-affected! [(logical i64)] (-> i64)
+  (let [s (state)]
+    (block :done
+      (when (<= logical 0) (break :done (stage-result! -1)))
+      (for [i 0 (al/al-len (.affected s))]
+        (when (= (al/al-get (.affected s) i) logical) (break :done 0)))
+      (let [status (list/push! (field s affected) logical)]
+        (when (!= status 0)
+          (set! (.condition-reserved s) false)
+          (break :done (stage-result! status))))
+      (let [status (rt/reserve-state-conditions! (.runtime s) (al/al-len (.affected s)))]
+        (when (!= status 0) (set! (.condition-reserved s) false))
+        (stage-result! status)))))
 (defn stage-schema! [(definition (ptr graph/Schema))] (-> i64)
   (block :done
     (when (!= (open!) 0) (break :done (.failure (state))))
+    (when (!= (remember-affected! (.logical definition)) 0) (break :done (.failure (state))))
     (let [s (state) next (graph/register! (field s heap) (load definition))]
       (when (= (p/cast i64 next) 0) (break :done (stage-result! -1)))
       (when (!= (stage-result! (list/push! (field s pending-owners) next)) 0)
@@ -83,11 +99,13 @@
 (defn stage-root! [(id i64) (logical i64) (version i64)] (-> i64)
   (block :done
     (when (!= (open!) 0) (break :done (.failure (state))))
+    (when (!= (remember-affected! logical) 0) (break :done (.failure (state))))
     (stage-result! (if (= (p/cast i64 (graph/root! (field (state) heap) id (schema logical version))) 0) -1 0))))
 (defn stage-root-with! [(id i64) (logical i64) (version i64)
   (initialize (fnptr c [(ptr i8) (ptr i64)] i64))] (-> i64)
   (block :done
     (when (!= (open!) 0) (break :done (.failure (state))))
+    (when (!= (remember-affected! logical) 0) (break :done (.failure (state))))
     (stage-result! (if (= (p/cast i64 (graph/root-with! (field (state) heap)
       id (schema logical version) initialize)) 0) -1 0))))
 (defn abort! [] (-> i64)
@@ -150,18 +168,28 @@
         (graph/retire! (field s heap))
         (collect!)
         (atomic/atomic-store (field s epoch) (.epoch (field s heap)))
-        (atomic/atomic-store (field s condition) 0)
+        (for [i 0 (al/al-len (.affected s))]
+          (rt/set-state-condition! (.runtime s) (al/al-get (.affected s) i) 0))
+        (when (.repair-all s) (rt/set-global-state-condition! (.runtime s) 0))
+        (atomic/atomic-store (field s condition) (rt/first-state-condition (.runtime s)))
         (rt/reopen-layout! (.runtime s))
-        (atomic/atomic-store (field s phase) 0))
+        (atomic/atomic-store (field s phase)
+          (if (= (atomic/atomic-load (field s condition)) 0) 0 3)))
       (when (.active s)
         (assert (= (.phase (field s heap)) 0))
         (if (and (.deferred s) (and (!= (.failure s) 0) (!= (.failure s) 3)))
-          (do (atomic/atomic-store (field s condition) (.failure s))
-              (atomic/atomic-store (field s phase) 3))
+          (do
+            (if (and (.condition-reserved s) (> (al/al-len (.affected s)) 0))
+              (for [i 0 (al/al-len (.affected s))]
+                (rt/set-state-condition! (.runtime s) (al/al-get (.affected s) i) (.failure s)))
+              (rt/set-global-state-condition! (.runtime s) (.failure s)))
+            (rt/reopen-layout! (.runtime s))
+            (atomic/atomic-store (field s condition) (.failure s))
+            (atomic/atomic-store (field s phase) 3))
           (do
             (atomic/atomic-store (field s condition) (.prior-condition s))
             (unless (.prior-closed s) (rt/reopen-layout! (.runtime s)))
-            (atomic/atomic-store (field s phase) (if (.prior-closed s) 3 0))))))
+            (atomic/atomic-store (field s phase) (if (or (.prior-closed s) (!= (.prior-condition s) 0)) 3 0))))))
     (set! (.active s) false) (set! (.cancel s) (p/cast (ptr i64) 0))) 0)
 (defn root-payload [(id i64) (logical i64) (version i64)] (-> (ptr i8))
   (let [s (state)]
@@ -181,5 +209,6 @@
         (assert (> (.references image) 0))
         (set! (.references image) (- (.references image) 1))))
     (al/al-free! (field s owners)) (al/al-free! (field s targets))
+    (al/al-free! (field s affected))
     (al/al-free! (field s pending-owners)) (al/al-free! (field s constructible))
     (set! (.initialized s) false)) 0)
