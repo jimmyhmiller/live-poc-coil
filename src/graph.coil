@@ -20,11 +20,14 @@
 (defstruct Edge [(from (ptr Schema)) (to (ptr Schema))
   (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))])
 (defstruct Handle [(id i64) (schema (ptr Schema)) (memory (slice u8))])
+(defstruct Root [(id i64) (handle (ptr Handle))])
 (defstruct Staged [(handle (ptr Handle)) (old-schema (ptr Schema)) (next-schema (ptr Schema))
   (old-memory (slice u8)) (next-memory (slice u8)) (initialized i64)
   (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))])
+(defstruct Savepoint [(epoch i64) (schemas i64) (edges i64) (handles i64) (roots i64)])
 (defstruct Heap [(allocator (dyn a/Allocator)) (schemas (al/ArrayList (ptr Schema)))
   (edges (al/ArrayList Edge)) (handles (al/ArrayList (ptr Handle)))
+  (roots (al/ArrayList Root))
   (staged (al/ArrayList Staged)) (journal relocation/Journal)
   (epoch i64) (phase i64) (missing-from i64) (missing-to i64) (missing-logical i64)])
 ;;; phase 0 idle; 1 preparing; 2 validated; 3 published, old ownership to retire.
@@ -35,6 +38,7 @@
   (set! (.schemas heap) (al/al-new [(ptr Schema)] allocator))
   (set! (.edges heap) (al/al-new [Edge] allocator))
   (set! (.handles heap) (al/al-new [(ptr Handle)] allocator))
+  (set! (.roots heap) (al/al-new [Root] allocator))
   (set! (.staged heap) (al/al-new [Staged] allocator))
   (relocation/init! (field heap journal) allocator))
 (defn payload [(memory (slice u8))] (-> (ptr i8)) (p/cast (ptr i8) (slice/slice-data memory)))
@@ -96,6 +100,38 @@
               (a/free-bytes (.allocator heap) memory (.alignment schema))
               (p/cast (ptr Handle) 0))
             (Some [handle] (al/al-push! (field heap handles) handle) handle)))))))
+(defn root [(heap (ptr Heap)) (id i64)] (-> (ptr Handle))
+  (block :done
+    (for [i 0 (al/al-len (.roots heap))]
+      (let [entry (al/al-get (.roots heap) i)]
+        (when (= (.id entry) id) (break :done (.handle entry)))))
+    (p/cast (ptr Handle) 0)))
+(defn attach-root! [(heap (ptr Heap)) (id i64) (handle (ptr Handle))] (-> i64)
+  (assert (= (.phase heap) 0))
+  (block :done
+    (when (or (<= id 0) (!= (p/cast i64 (root heap id)) 0)) (break :done -1))
+    (let [(mut found) false]
+      (for [i 0 (al/al-len (.handles heap))]
+        (when (= (al/al-get (.handles heap) i) handle) (set! found true) (break)))
+      (unless (load found) (break :done -1)))
+    (list/push! (field heap roots) (Root :id id :handle handle))))
+;;; A proposed new initializer or physical version never resets an existing
+;;; root. Migration changes its payload through the graph transaction instead.
+(defn root! [(heap (ptr Heap)) (id i64) (schema (ptr Schema))] (-> (ptr Handle))
+  (assert (= (.phase heap) 0))
+  (block :done
+    (unless (and (> id 0) (known? heap schema)) (break :done (p/cast (ptr Handle) 0)))
+    (let [existing (root heap id)]
+      (when (!= (p/cast i64 existing) 0)
+        (break :done (if (= (.logical (.schema existing)) (.logical schema))
+                      existing (p/cast (ptr Handle) 0)))))
+    (unless (= (list/reserve! (field heap roots) (+ (al/al-len (.roots heap)) 1)) 0)
+      (break :done (p/cast (ptr Handle) 0)))
+    (let [handle (new! heap schema)]
+      (when (!= (p/cast i64 handle) 0)
+        (al/al-push! (field heap roots) (Root :id id :handle handle)))
+      handle)))
+
 (defn cancelled? [(flag (ptr i64))] (-> bool)
   (and (!= (p/cast i64 flag) 0) (!= (atomic/atomic-load flag) 0)))
 (defn abort! [(heap (ptr Heap))] (-> i64)
@@ -188,6 +224,35 @@
   (set! (.len (field heap staged)) 0)
   (relocation/reset! (field heap journal))
   (set! (.phase heap) 0) 0)
+(defn savepoint [(heap (ptr Heap))] (-> Savepoint)
+  (assert (= (.phase heap) 0))
+  (Savepoint :epoch (.epoch heap) :schemas (al/al-len (.schemas heap)) :edges (al/al-len (.edges heap))
+    :handles (al/al-len (.handles heap)) :roots (al/al-len (.roots heap))))
+;;; Candidate registrars may add schemas, transitions and initialized roots
+;;; while admission is closed. Roll those additions back before unloading their
+;;; native image: abort callbacks themselves belong to the candidate generation.
+(defn rollback! [(heap (ptr Heap)) (point Savepoint)] (-> i64)
+  (assert (!= (.phase heap) 3))
+  (assert (= (.epoch heap) (.epoch point)))
+  (assert (and (>= (.handles point) 0) (>= (.schemas point) 0)))
+  (assert (and (and (>= (.roots point) 0) (<= (.roots point) (al/al-len (.roots heap))))
+               (and (>= (.edges point) 0) (<= (.edges point) (al/al-len (.edges heap))))))
+  (when (!= (.phase heap) 0) (abort! heap))
+  (assert (and (<= (.handles point) (al/al-len (.handles heap)))
+               (<= (.schemas point) (al/al-len (.schemas heap)))))
+  (for [n (.handles point) (al/al-len (.handles heap))]
+    (let [handle (al/al-get (.handles heap) (- (+ (al/al-len (.handles heap)) (.handles point)) (+ n 1)))
+          schema (.schema handle)]
+      (p/call-ptr (.abort schema) (payload (.memory handle)) (.fields schema))
+      (a/free-bytes (.allocator heap) (.memory handle) (.alignment schema))
+      (a/destroy [Handle] (.allocator heap) handle)))
+  (set! (.len (field heap handles)) (.handles point))
+  (set! (.len (field heap roots)) (.roots point))
+  (set! (.len (field heap edges)) (.edges point))
+  (for [i (.schemas point) (al/al-len (.schemas heap))]
+    (a/destroy [Schema] (.allocator heap) (al/al-get (.schemas heap) i)))
+  (set! (.len (field heap schemas)) (.schemas point)) 0)
+
 (defn destroy! [(heap (ptr Heap))] (-> i64)
   (assert (= (.phase heap) 0))
   (for [i 0 (al/al-len (.handles heap))]
@@ -196,6 +261,7 @@
       (a/free-bytes (.allocator heap) (.memory handle) (.alignment schema))
       (a/destroy [Handle] (.allocator heap) handle)))
   (for [i 0 (al/al-len (.schemas heap))] (a/destroy [Schema] (.allocator heap) (al/al-get (.schemas heap) i)))
+  (al/al-free! (field heap roots))
   (al/al-free! (field heap handles)) (al/al-free! (field heap schemas))
   (al/al-free! (field heap edges)) (al/al-free! (field heap staged))
   (relocation/destroy! (field heap journal)))

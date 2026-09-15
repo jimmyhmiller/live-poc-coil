@@ -6,7 +6,7 @@
 
 Schemas identify a nominal type and an exact physical version. Transitions bind a specific source schema to a specific destination schema. Missing edges report both versions and the nominal identity. Reverts require a new forward version; this layer does not guess or compose intermediate transitions.
 
-Handles preserve identity across publication. Preparation allocates all destination payloads first, then invokes ownership policies, rewrites references, and validates the complete shadow graph. Unchanged objects are cloned too so their incoming references can be rewritten privately. This is an intentionally conservative whole-graph implementation.
+Handles preserve identity across publication. Named roots retain those handles; a repeated initializer proposal leaves existing values intact. Multiple root identities can intentionally share one handle. Candidate registration savepoints roll back new schemas, transitions, and initialized roots before their native adapter image is unloaded. A savepoint cannot roll back a committed heap epoch. Preparation allocates all destination payloads first, then invokes ownership policies, rewrites references, and validates the complete shadow graph. Unchanged objects are cloned too so their incoming references can be rewritten privately. This is an intentionally conservative whole-graph implementation.
 
 Object references relocate by exact base identity and nominal type. Interior slices use separate allocation-range mappings supplied by their owning value policies. Reordered struct fields cannot be relocated by assuming that their old byte offsets still mean the same thing. Invalid extents, overlapping owners, null nonempty ranges, and integer overflow are rejected.
 
