@@ -40,6 +40,18 @@ With deferred publication, a missing transition preserves the desired schema sep
 
 The current native tests cover stable roots, repeated initializers, added/reordered fields, distinct defaults, explicit overrides, bool-to-sum transitions, missing-edge rollback and transition-only repair.
 
+## Explicit reset
+
+```coil
+(reset-state! world (State :value 99))
+```
+
+Reset is an explicit transaction, independent of `letonce`. It preserves the root handle, prepares a fresh value with checked defaults, and rewrites incoming references before publication. The initializer follows the same pure-value rules as initial construction. An invalid initializer, missing root, duplicate reset of aliased roots, allocation failure, cancellation or failed preparation leaves accepted state intact.
+
+A reset does not alter the saved `letonce` initializer and is not replayed by declaration rechecks or pending-source repair. A rejected reset must be submitted again explicitly. Reusing a protocol request ID returns the original receipt and does not execute the command again. A new explicit submission is a new reset.
+
+Reset can accompany a schema change, but only replaces the named root's value. Other objects of that schema still require a valid transition or their own explicit resets. Resource-bearing policies must register fresh ownership and reference mappings; a stale interior alias cannot be guessed into a replacement allocation.
+
 ## Work still in progress
 
-Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Nested ownership policies, managed sums, generic schemas and explicit state reset are not complete. Versioned compiler roots now retire obsolete schema metadata and native generations; the 1,000-edit durability gate passes. The moving Paper scenario has passed radius/default/retype/repair checks, including independent input domains; visible migration-failure injection remains outstanding. The complete contract remains in [PLAN.md](PLAN.md).
+Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Nested ownership policies, managed sums, generic schemas are not complete. Versioned compiler roots now retire obsolete schema metadata and native generations; the 1,000-edit durability gate passes. The moving Paper scenario has passed radius/default/retype/repair checks, including independent input domains; visible migration-failure injection remains outstanding. The complete contract remains in [PLAN.md](PLAN.md).

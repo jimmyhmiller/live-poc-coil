@@ -21,6 +21,8 @@
   (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))])
 (defstruct Handle [(id i64) (schema (ptr Schema)) (memory (slice u8))])
 (defstruct Root [(id i64) (handle (ptr Handle))])
+(defstruct Reset [(root i64) (schema (ptr Schema))
+  (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))])
 (defstruct Staged [(handle (ptr Handle)) (old-schema (ptr Schema)) (next-schema (ptr Schema))
   (old-memory (slice u8)) (next-memory (slice u8)) (initialized i64)
   (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))])
@@ -151,6 +153,9 @@
   (relocation/reset! (field heap journal))
   (set! (.phase heap) 0) 0)
 (defn prepare! [(heap (ptr Heap)) (targets (slice (ptr Schema))) (cancel (ptr i64))] (-> i64)
+  (prepare-with-resets! heap targets (slice/slice-new (p/cast (ptr Reset) 0) 0) cancel))
+(defn prepare-with-resets! [(heap (ptr Heap)) (targets (slice (ptr Schema)))
+  (resets (slice Reset)) (cancel (ptr i64))] (-> i64)
   (assert (= (.phase heap) 0))
   (set! (.phase heap) 1)
   (set! (.missing-from heap) 0) (set! (.missing-to heap) 0) (set! (.missing-logical heap) 0)
@@ -162,6 +167,15 @@
           (for [j 0 i]
             (let [other (slice/slice-get targets j)]
               (when (= (.logical target) (.logical other)) (break :done -1))))))
+      (for [i 0 (slice/slice-len resets)]
+        (let [request (slice/slice-get resets i) handle (root heap (.root request))]
+          (when (= (p/cast i64 handle) 0) (break :done -1))
+          (unless (known? heap (.schema request)) (break :done -1))
+          (unless (= (.logical (.schema handle)) (.logical (.schema request))) (break :done -1))
+          (when (= (p/cast i64 (p/cast (ptr i8) (.prepare request))) 0) (break :done -1))
+          (for [j 0 i]
+            (let [prior (slice/slice-get resets j)]
+              (when (= (root heap (.root prior)) handle) (break :done -1))))))
       (unless (= (list/reserve! (field heap staged) (al/al-len (.handles heap))) 0) (break :done -4))
       ; Allocate every destination before invoking any policy. Clone unchanged
       ; objects too, so their references into changed objects are rewritten in
@@ -169,11 +183,16 @@
       (for [i 0 (al/al-len (.handles heap))]
         (when (cancelled? cancel) (break :done 3))
         (let [handle (al/al-get (.handles heap) i) old (.schema handle) (mut target) old
-              (mut adapter) (.clone old)]
+              (mut adapter) (.clone old) (mut reset) false]
           (for [j 0 (slice/slice-len targets)]
             (let [candidate (slice/slice-get targets j)]
               (when (= (.logical candidate) (.logical old)) (set! target candidate))))
-          (when (!= (load target) old)
+          (for [j 0 (slice/slice-len resets)]
+            (let [request (slice/slice-get resets j)]
+              (when (= (root heap (.root request)) handle)
+                (unless (= (.schema request) (load target)) (break :done -1))
+                (set! adapter (.prepare request)) (set! reset true))))
+          (when (and (!= (load target) old) (not (load reset)))
             (let [(mut found) false]
               (for [j 0 (al/al-len (.edges heap))]
                 (let [edge (al/al-get (.edges heap) j)]

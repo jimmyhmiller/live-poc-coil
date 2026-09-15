@@ -40,7 +40,7 @@
     (p/code-list-push! out name)
     (for [i 1 (p/code-count module)]
       (let [form (p/code-nth module i)]
-        (unless (or (transitions/declaration? form) (or (records/managed? form) (records/root? form))) (p/code-list-push! out form) 0)))
+        (unless (or (records/reset? form) (or (transitions/declaration? form) (or (records/managed? form) (records/root? form)))) (p/code-list-push! out form) 0)))
     (let [changes (p/code-list-done changed) declarations (policy/schemas (load state))]
       (for [i 0 (p/code-count changes)]
         (let [record (p/code-nth declarations (p/code-int (p/code-nth changes i)))
@@ -63,6 +63,13 @@
         (let [record (p/code-nth (policy/roots (load state)) (p/code-int (p/code-nth indices i)))
               generated (adapters/emit-root record (by-logical (policy/schemas (load state)) (p/code-nth record 3)))]
           (for [j 0 (p/code-count generated)] (p/code-list-push! out (p/code-nth generated j))))))
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (records/reset? form)
+          (let [record (records/reset-record (load state) name form)
+                generated (adapters/emit-root-command record
+                  (by-logical (policy/schemas (load state)) (p/code-nth record 3)) true)]
+            (for [j 0 (p/code-count generated)] (p/code-list-push! out (p/code-nth generated j)))))))
     (p/code-list-done out)))
 (defn mapping [(state Code) (module Code)] (-> Code)
   (let [out (p/code-list-new)]

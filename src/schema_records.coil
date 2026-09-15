@@ -101,3 +101,21 @@
         (store! state (policy/with-state (load state) schemas
           (replace roots index `(~module ~name ~id ~logical ~initializer)))))
       index)))
+
+(defn reset? [(form Code)] (-> bool) (syntax/head? form `reset-state!))
+;;; A reset is a one-shot command. It never replaces the letonce initializer
+;;; stored in accepted policy state, so declaration rechecks do not replay it.
+(defn reset-record [(state Code) (module Code) (form Code)] (-> Code)
+  (unless (and (= (p/code-count form) 3) (p/code-sym? (p/code-nth form 1)))
+    (p/error "reset-state! requires a root name and explicit managed constructor") 0)
+  (let [roots (policy/roots state) index (lookup roots module (p/code-nth form 1))]
+    (when (< index 0) (p/error "reset-state! requires an existing managed root") 0)
+    (let [root (p/code-nth roots index) (mut schema) '() initializer (p/code-nth form 2)]
+      (for [i 0 (p/code-count (policy/schemas state))]
+        (let [candidate (p/code-nth (policy/schemas state) i)]
+          (when (p/code-eq (p/code-nth candidate 2) (p/code-nth root 3)) (set! schema candidate))))
+      (unless (and (p/code-list? initializer) (> (p/code-count initializer) 0))
+        (p/error "reset-state! requires an explicit managed constructor") 0)
+      (unless (p/bound-identifier=? (p/code-nth initializer 0) (p/code-nth (load schema) 1))
+        (p/error "reset-state! constructor must have the root's logical schema") 0)
+      `(~(p/code-nth root 0) ~(p/code-nth root 1) ~(p/code-nth root 2) ~(p/code-nth root 3) ~initializer))))

@@ -41,7 +41,7 @@
                 (when (reader/sexp-sym? head)
                   (set! kind (reader/sexp-sym head))
                   (set! persistent (source/top-level? form))
-                  (when (or (= (load kind) "live-poc-coil.meta/evaluate") (= (load kind) "module"))
+                  (when (or (= (load kind) "reset-state!") (or (= (load kind) "live-poc-coil.meta/evaluate") (= (load kind) "module")))
                     (set! persistent false) 0)
                   (when (and (>= (reader/sexp-count form) 2) (reader/sexp-sym? (reader/sexp-nth form 1)))
                     (when (or (source/declaration? (load kind)) (= (load kind) "const"))

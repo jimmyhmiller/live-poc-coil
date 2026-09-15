@@ -12,7 +12,7 @@
 ;;; runtime invocation and cannot enter while a layout transaction is active.
 (defstruct Owner [(schema (ptr graph/Schema)) (image (ptr rt/Image))])
 (defstruct State [(runtime (ptr rt/Runtime)) (heap graph/Heap) (point graph/Savepoint)
-  (targets (al/ArrayList (ptr graph/Schema))) (owners (al/ArrayList Owner))
+  (resets (al/ArrayList graph/Reset)) (targets (al/ArrayList (ptr graph/Schema))) (owners (al/ArrayList Owner))
   (pending-owners (al/ArrayList (ptr graph/Schema)))
   (constructible (al/ArrayList (ptr graph/Schema))) (cancel (ptr i64)) (active bool) (deferred bool)
   (failure i64) (affected (al/ArrayList i64)) (condition-reserved bool) (repair-all bool) (prior-closed bool) (prior-condition i64)
@@ -24,6 +24,7 @@
     (store! s (p/zeroed State))
     (set! (.runtime s) runtime)
     (graph/init! (field s heap) (a/malloc-allocator))
+    (set! (.resets s) (al/al-new [graph/Reset] (a/malloc-allocator)))
     (set! (.targets s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
     (set! (.affected s) (al/al-new [i64] (a/malloc-allocator)))
     (set! (.owners s) (al/al-new [Owner] (a/malloc-allocator)))
@@ -34,6 +35,7 @@
   (let [s (state)]
     (assert (.initialized s)) (assert (= (.phase (field s heap)) 0))
     (set! (.point s) (graph/savepoint (field s heap)))
+    (set! (.len (field s resets)) 0)
     (set! (.len (field s targets)) 0)
     (set! (.len (field s affected)) 0) (set! (.condition-reserved s) true)
     (set! (.cancel s) cancel) (set! (.deferred s) deferred) (set! (.repair-all s) repair-all)
@@ -108,6 +110,13 @@
     (when (!= (remember-affected! logical) 0) (break :done (.failure (state))))
     (stage-result! (if (= (p/cast i64 (graph/root-with! (field (state) heap)
       id (schema logical version) initialize)) 0) -1 0))))
+(defn stage-root-reset! [(id i64) (logical i64) (version i64)
+  (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))] (-> i64)
+  (block :done
+    (when (!= (open!) 0) (break :done (.failure (state))))
+    (when (!= (remember-affected! logical) 0) (break :done (.failure (state))))
+    (stage-result! (list/push! (field (state) resets)
+      (graph/Reset :root id :schema (schema logical version) :prepare prepare)))))
 (defn abort! [] (-> i64)
   (let [s (state)]
     (when (.active s) (graph/rollback! (field s heap) (.point s)))
@@ -124,8 +133,9 @@
         (stage-result! (list/reserve! (field s constructible)
           (+ (al/al-len (.constructible s)) (al/al-len (.targets s))))))
       (when (= (.failure s) 0)
-        (stage-result! (graph/prepare! (field s heap)
-          (slice/slice-new (.data (field s targets)) (al/al-len (.targets s))) (.cancel s)))))
+        (stage-result! (graph/prepare-with-resets! (field s heap)
+          (slice/slice-new (.data (field s targets)) (al/al-len (.targets s)))
+          (slice/slice-new (.data (field s resets)) (al/al-len (.resets s))) (.cancel s)))))
     (when (!= (.failure s) 0) (abort!))
     (.failure s)))
 (defn publish! [(image (ptr rt/Image))] (-> i64)
@@ -190,6 +200,7 @@
             (atomic/atomic-store (field s condition) (.prior-condition s))
             (unless (.prior-closed s) (rt/reopen-layout! (.runtime s)))
             (atomic/atomic-store (field s phase) (if (or (.prior-closed s) (!= (.prior-condition s) 0)) 3 0))))))
+    (set! (.len (field s resets)) 0)
     (set! (.active s) false) (set! (.cancel s) (p/cast (ptr i64) 0))) 0)
 (defn root-payload [(id i64) (logical i64) (version i64)] (-> (ptr i8))
   (let [s (state)]
@@ -199,7 +210,7 @@
       (assert (and (= (.logical (.schema handle)) logical) (= (.version (.schema handle)) version)))
       (graph/payload (.memory handle)))))
 (export-c [stage-result! :as "lpc_stage_result"] [stage-schema! :as "lpc_stage_schema"]
-  [stage-edge! :as "lpc_stage_edge"] [stage-root! :as "lpc_stage_root"] [stage-root-with! :as "lpc_stage_root_with"] [root-payload :as "lpc_root_payload"])
+  [stage-edge! :as "lpc_stage_edge"] [stage-root! :as "lpc_stage_root"] [stage-root-with! :as "lpc_stage_root_with"] [stage-root-reset! :as "lpc_stage_root_reset"] [root-payload :as "lpc_root_payload"])
 (defn destroy! [] (-> i64)
   (let [s (state)]
     (assert (= (.phase (field s heap)) 0))
@@ -209,6 +220,7 @@
         (assert (> (.references image) 0))
         (set! (.references image) (- (.references image) 1))))
     (al/al-free! (field s owners)) (al/al-free! (field s targets))
+    (al/al-free! (field s resets))
     (al/al-free! (field s affected))
     (al/al-free! (field s pending-owners)) (al/al-free! (field s constructible))
     (set! (.initialized s) false)) 0)

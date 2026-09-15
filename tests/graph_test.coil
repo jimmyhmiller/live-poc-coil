@@ -234,3 +234,46 @@
         (assert (= (.value (p/cast (ptr Node1) (graph/payload (.memory third)))) 47))))
     (graph/destroy! heap))
   (assert (= (.retired (audit)) 3)))
+
+(defn reset-node [(old (ptr i8)) (target (ptr i8)) (journal (ptr relocation/Journal)) (prefix (ptr i64))] (-> i64)
+  (initialize target prefix)
+  (let [node (p/cast (ptr Node1) target)]
+    (set! (.value node) 99)
+    (if (.fail-copy (audit)) -71
+      ; Fresh ownership has a new range identity; old interior aliases are not
+      ; silently redirected into a replacement allocation.
+      (relocation/range! journal (p/cast (ptr i8) (slice/slice-data (.owned node))) 24
+        (p/cast (ptr i8) (slice/slice-data (.owned node))) 24))))
+(deftest graph-reset-preserves-handles-and-incoming-edges-with-transactional-ownership
+  (store! (audit) (p/zeroed Audit))
+  (let [heap (p/alloc-stack graph/Heap) requests (p/alloc-stack (array graph/Reset 2))
+        cancel (p/alloc-stack i64) targets (slice/slice-new (p/cast (ptr (ptr graph/Schema)) 0) 0)]
+    (store! cancel 0) (graph/init! heap (a/malloc-allocator))
+    (let [schema (graph/register! heap (schema1)) anchor-type (graph/register! heap (anchor-schema))
+          handle (graph/root! heap 1 schema) anchor (graph/root! heap 2 anchor-type)
+          old (graph/payload (.memory handle))]
+      (set! (.value (p/cast (ptr Node1) old)) 42)
+      (set! (.node (p/cast (ptr Anchor) (graph/payload (.memory anchor)))) old)
+      (assert (= (graph/attach-root! heap 9 handle) 0))
+      (store! (p/index requests 0) (graph/Reset :root 1 :schema schema :prepare (p/fnptr-of reset-node)))
+      (store! (p/index requests 1) (graph/Reset :root 9 :schema schema :prepare (p/fnptr-of reset-node)))
+      (assert (= (graph/prepare-with-resets! heap targets (slice/slice-new (p/cast (ptr graph/Reset) requests) 2) cancel) -1))
+      (assert (= (graph/payload (.memory handle)) old))
+      (set! (.fail-copy (audit)) true)
+      (assert (= (graph/prepare-with-resets! heap targets (slice/slice-new (p/cast (ptr graph/Reset) requests) 1) cancel) -71))
+      (assert (= (.aborted (audit)) 1)) (assert (= (.retired (audit)) 0))
+      (assert (= (graph/payload (.memory handle)) old))
+      (assert (= (.value (p/cast (ptr Node1) old)) 42))
+      (set! (.fail-copy (audit)) false) (store! cancel 1)
+      (assert (= (graph/prepare-with-resets! heap targets (slice/slice-new (p/cast (ptr graph/Reset) requests) 1) cancel) 3))
+      (assert (= (graph/payload (.memory handle)) old)) (store! cancel 0)
+      (assert (= (graph/prepare-with-resets! heap targets (slice/slice-new (p/cast (ptr graph/Reset) requests) 1) cancel) 0))
+      (assert (= (graph/payload (.memory handle)) old))
+      (graph/publish! heap)
+      (assert (= (graph/root heap 9) handle))
+      (assert (!= (graph/payload (.memory handle)) old))
+      (assert (= (.value (p/cast (ptr Node1) (graph/payload (.memory handle)))) 99))
+      (assert (= (.node (p/cast (ptr Anchor) (graph/payload (.memory anchor)))) (graph/payload (.memory handle))))
+      (graph/retire! heap) (assert (= (.retired (audit)) 1)))
+    (graph/destroy! heap)
+    (assert (= (.retired (audit)) 2))))

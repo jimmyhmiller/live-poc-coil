@@ -23,3 +23,8 @@
 (defn root-with! [(id i64) (logical i64) (version i64)
   (initialize (fnptr c [(ptr i8) (ptr i64)] i64))] (-> i64)
   (lpc_stage_root_with id logical version initialize))
+
+(extern lpc_stage_root_reset :cc c [i64 i64 i64 (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64)] (-> i64))
+(defn root-reset! [(id i64) (logical i64) (version i64)
+  (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))] (-> i64)
+  (lpc_stage_root_reset id logical version prepare))
