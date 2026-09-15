@@ -1,0 +1,28 @@
+(module live-poc-coil.fault-allocator-test)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.fault-allocator" :as fault)
+(deftest payload-fault-skips-typed-metadata-and-disarms-after-one-failure
+  (let [state (p/alloc-stack fault/FaultAllocator)]
+    (fault/init! state (a/malloc-allocator))
+    (let [allocator (p/make-dyn a/Allocator state)]
+      (set! (.remaining state) 1)
+      (match (a/alloc [i64] allocator 1)
+        (None [] (assert false))
+        (Some [metadata]
+          (assert (= (.remaining state) 1))
+          (store! (slice/slice-data metadata) 42)
+          (match (a/alloc-bytes allocator 8 8)
+            (None [] (assert false))
+            (Some [first]
+              (assert (= (.remaining state) 0))
+              (assert (match (a/alloc-bytes allocator 8 8) (None [] true) (_ false)))
+              (assert (= (.remaining state) -1)) (assert (= (.hits state) 1))
+              (match (a/alloc-bytes allocator 8 8)
+                (None [] (assert false))
+                (Some [next] (a/free-bytes allocator next 8)))
+              (assert (= (load (slice/slice-data metadata)) 42))
+              (a/free-bytes allocator first 8)))
+          (a/free allocator metadata)))
+      (assert (= (.hits state) 1)))))

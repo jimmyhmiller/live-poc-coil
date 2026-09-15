@@ -1,6 +1,9 @@
 (module live-poc-coil.managed)
 (import "coil.primitive" :as p)
 (import "coil.alloc" :as a)
+(import "coil.str" :as str)
+(import "live-poc-coil.fault-allocator" :as fault)
+(extern getenv :cc c [(ptr i8)] (-> (ptr i8)))
 (import "coil.arraylist" :as al)
 (import "coil.atomic" :as atomic)
 (import "coil.slice" :as slice)
@@ -11,7 +14,7 @@
 ;;; The compiler lane owns candidate registries. UI access goes through a pinned
 ;;; runtime invocation and cannot enter while a layout transaction is active.
 (defstruct Owner [(schema (ptr graph/Schema)) (image (ptr rt/Image))])
-(defstruct State [(runtime (ptr rt/Runtime)) (heap graph/Heap) (point graph/Savepoint)
+(defstruct State [(faults fault/FaultAllocator) (allow-faults bool) (validation-after i64) (validation-hits i64) (runtime (ptr rt/Runtime)) (heap graph/Heap) (point graph/Savepoint)
   (resets (al/ArrayList graph/Reset)) (targets (al/ArrayList (ptr graph/Schema))) (owners (al/ArrayList Owner))
   (pending-owners (al/ArrayList (ptr graph/Schema)))
   (constructible (al/ArrayList (ptr graph/Schema))) (cancel (ptr i64)) (active bool) (deferred bool)
@@ -23,7 +26,13 @@
     (assert (not (.initialized s)))
     (store! s (p/zeroed State))
     (set! (.runtime s) runtime)
-    (graph/init! (field s heap) (a/malloc-allocator))
+    (fault/init! (field s faults) (a/malloc-allocator))
+    (let [setting (getenv c"LPC_TESTING")]
+      (set! (.allow-faults s) (and (!= (p/cast i64 setting) 0) (= (str/cstr->str setting) "1"))))
+    (graph/init! (field s heap) (p/make-dyn a/Allocator (field s faults)))
+    (set! (.validation-after s) -1)
+    (set! (.prepared-validation (field s heap))
+      (graph/Validation :context (p/cast (ptr i8) s) :check (p/fnptr-of validate-prepared)))
     (set! (.resets s) (al/al-new [graph/Reset] (a/malloc-allocator)))
     (set! (.targets s) (al/al-new [(ptr graph/Schema)] (a/malloc-allocator)))
     (set! (.affected s) (al/al-new [i64] (a/malloc-allocator)))
@@ -224,3 +233,35 @@
     (al/al-free! (field s affected))
     (al/al-free! (field s pending-owners)) (al/al-free! (field s constructible))
     (set! (.initialized s) false)) 0)
+
+;;; Test controls run on the serialized compiler lane, outside graph preparation.
+;;; They are unavailable unless the host was started with LPC_TESTING=1.
+(defn test-payload-failure! [(after i64)] (-> i64)
+  (let [s (state)]
+    (if (or (not (.initialized s)) (or (not (.allow-faults s))
+        (or (< after -1) (or (.active s) (!= (.phase (field s heap)) 0))))) -1
+      (do (set! (.remaining (field s faults)) after) 0))))
+(defn test-payload-failures [] (-> i64)
+  (let [s (state)]
+    (if (and (.initialized s) (.allow-faults s)) (.hits (field s faults)) -1)))
+(export-c [test-payload-failure! :as "lpc_test_payload_failure"]
+  [test-payload-failures :as "lpc_test_payload_failures"])
+
+(defn validate-prepared [(context (ptr i8)) (schema (ptr graph/Schema)) (payload (ptr i8))] (-> i64)
+  (let [s (p/cast (ptr State) context) result (graph/validate-schema context schema payload)]
+    (if (!= result 0) result
+      (if (= (.validation-after s) 0)
+        (do (set! (.validation-after s) -1)
+            (set! (.validation-hits s) (+ (.validation-hits s) 1)) -91)
+        (do (when (> (.validation-after s) 0)
+              (set! (.validation-after s) (- (.validation-after s) 1))) 0)))))
+(defn test-validation-failure! [(after i64)] (-> i64)
+  (let [s (state)]
+    (if (or (not (.initialized s)) (or (not (.allow-faults s))
+        (or (< after -1) (or (.active s) (!= (.phase (field s heap)) 0))))) -1
+      (do (set! (.validation-after s) after) 0))))
+(defn test-validation-failures [] (-> i64)
+  (let [s (state)]
+    (if (and (.initialized s) (.allow-faults s)) (.validation-hits s) -1)))
+(export-c [test-validation-failure! :as "lpc_test_validation_failure"]
+  [test-validation-failures :as "lpc_test_validation_failures"])

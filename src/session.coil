@@ -71,10 +71,13 @@
 (defn stage-source [(module (ptr u8)) (module-length i64) (name (ptr u8)) (name-length i64) (condition i64) (text (ptr u8)) (text-length i64)] (-> i64)
   (assert (!= (p/cast i64 (.staging (instance))) 0))
   (metadata-lock!)
-  (let [index (source/find (field (instance) sources)
+  (let [(mut index) (source/find (field (instance) sources)
                (slice/slice-new module module-length) "defn" (slice/slice-new name name-length))]
-    (assert (>= index 0))
-    (al/al-push! (field (instance) outcomes) (source-plan/Outcome :index index :condition condition :text (slice/slice-new text text-length))))
+    (when (< (load index) 0)
+      (set! index (source/find (field (instance) sources)
+        (slice/slice-new module module-length) "defn*" (slice/slice-new name name-length))) 0)
+    (assert (>= (load index) 0))
+    (al/al-push! (field (instance) outcomes) (source-plan/Outcome :index (load index) :condition condition :text (slice/slice-new text text-length))))
   (metadata-unlock!))
 (export-c [stage-blocked :as "lpc_stage_blocked"] [stage-source :as "lpc_stage_source"])
 

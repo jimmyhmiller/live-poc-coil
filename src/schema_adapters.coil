@@ -17,7 +17,16 @@
     (for [i 0 (p/code-count fields)]
       (when (p/code-eq (p/code-nth (p/code-nth fields i) 0) name) (break :found i)))
     -1))
-(defn emit [(record Code) (prior Code)] (-> Code)
+(defn schema-for-type [(schemas Code) (module Code) (type Code)] (-> Code)
+  (block :found
+    (unless (p/code-sym? type) (break :found '()))
+    (for [i 0 (p/code-count schemas)]
+      (let [candidate (p/code-nth schemas i)]
+        (when (and (p/code-eq (p/code-nth candidate 0) module)
+                   (= (p/code-str (p/code-nth candidate 1)) (p/code-str type)))
+          (break :found candidate))))
+    '()))
+(defn emit [(record Code) (prior Code) (schemas Code) (prior-schemas Code)] (-> Code)
   (let [type (p/code-nth record 4) logical (p/code-nth record 2) version (p/code-nth record 3)
         fields (p/code-nth record 5) count (p/code-count fields)
         initialize (p/fresh-identifier "state-initialize")
@@ -26,43 +35,67 @@
         retire (p/fresh-identifier "state-retire") proof (p/fresh-identifier "state-value-policy")
         descriptor (p/code-nth record 8)
         registrar (p/fresh-identifier "state-schema") out (p/code-list-new)
-        defaults (p/code-list-new) migration (p/code-list-new)
+        defaults (p/code-list-new) migration (p/code-list-new) values (p/code-list-new)
         (mut available) true target (p/fresh-identifier "target") source (p/fresh-identifier "source")
-        migration-prefix (p/fresh-identifier "migration-prefix")]
+        migration-prefix (p/fresh-identifier "migration-prefix")
+        value-migrate (p/code-nth record 10) old-value (p/fresh-identifier "old-value")]
     (p/code-list-push! out
-      `(defn* ~proof :jit/retain false :live/pure true [(value ~type)] (-> ~type) value))
+      `(defn* ~proof :jit/retain false :lpc/preparation true [(value ~type)] (-> ~type) value))
     (for [i 0 count]
       (let [field (p/code-nth fields i) name (p/code-nth field 0) field-type (p/code-nth field 1)
-            old-index (if (> (p/code-count prior) 0) (field-index (p/code-nth prior 5) name) -1)]
+            transition (if (> (p/code-count prior) 0) (transitions/for-edge record prior name) '())
+            source-name (if (> (p/code-count transition) 8) (p/code-nth transition 8) name)
+            old-index (if (> (p/code-count prior) 0) (field-index (p/code-nth prior 5) source-name) -1)]
         (when (>= (p/code-count field) 3)
           (let [default (p/code-nth field 3)]
             (p/code-list-push! out
-              `(defn* ~default :jit/retain false :live/pure true [] (-> ~field-type) ~(p/code-nth field 2)))
+              `(defn* ~default :jit/retain false :lpc/preparation true [] (-> ~field-type) ~(p/code-nth field 2)))
             (p/code-list-push! defaults `(store! (field ~target ~name) (~default)))
             (when (< old-index 0)
-              (p/code-list-push! migration `(store! (field ~target ~name) (~default))) 0)))
+              (p/code-list-push! migration `(store! (field ~target ~name) (~default)))
+              (p/code-list-push! values (syntax/keyword name))
+              (p/code-list-push! values `(~default)) 0)))
         (if (>= old-index 0)
           (let [old-field (p/code-nth (p/code-nth prior 5) old-index)
-                transition (transitions/for-edge record prior name)
+                current-child (schema-for-type schemas (p/code-nth record 0) field-type)
+                prior-child (schema-for-type prior-schemas (p/code-nth record 0)
+                  (p/code-nth old-field 1))
+                nested (and (> (p/code-count current-child) 0) (and (> (p/code-count prior-child) 0)
+                  (and (p/code-eq (p/code-nth current-child 2) (p/code-nth prior-child 2))
+                    (not (p/code-eq (p/code-nth current-child 3) (p/code-nth prior-child 3))))))
                 copy (p/fresh-identifier "state-field-copy")]
             (if (> (p/code-count transition) 0)
               (do
                 (p/code-list-push! out
-                  `(defn* ~copy :jit/retain false :live/pure true
+                  `(defn* ~copy :jit/retain false :lpc/preparation true
                     [(~(p/code-nth transition 5) ~(p/code-nth old-field 1))]
                     (-> ~field-type) ~(p/code-nth transition 6)))
                 (p/code-list-push! migration
-                  `(store! (field ~target ~name) (~copy ~(field-access source name)))) 0)
+                  `(store! (field ~target ~name) (~copy ~(field-access source source-name))))
+                (p/code-list-push! values (syntax/keyword name))
+                (p/code-list-push! values `(~copy ~(field-access old-value source-name))) 0)
+              (if nested
+                (do
+                  (p/code-list-push! out
+                    `(defn* ~copy :jit/retain false
+                      [(old ~(p/code-nth prior-child 4))] (-> ~(p/code-nth current-child 4))
+                      (~(p/code-nth current-child 10) old)))
+                  (p/code-list-push! migration
+                    `(store! (field ~target ~name) (~copy ~(field-access source source-name))))
+                  (p/code-list-push! values (syntax/keyword name))
+                  (p/code-list-push! values `(~copy ~(field-access old-value source-name))) 0)
               (if (p/code-eq (p/code-nth old-field 1) field-type)
                 (do
                   ; The checked signature, not the spelling test alone,
                   ; authorizes the derived value copy.
                   (p/code-list-push! out
-                    `(defn* ~copy :jit/retain false :live/pure true [(old ~(p/code-nth old-field 1))]
+                    `(defn* ~copy :jit/retain false :lpc/preparation true [(old ~(p/code-nth old-field 1))]
                       (-> ~field-type) old))
                   (p/code-list-push! migration
-                    `(store! (field ~target ~name) (~copy ~(field-access source name)))) 0)
-                (do (set! available false) 0))))
+                    `(store! (field ~target ~name) (~copy ~(field-access source source-name))))
+                  (p/code-list-push! values (syntax/keyword name))
+                  (p/code-list-push! values `(~copy ~(field-access old-value source-name))) 0)
+                (do (set! available false) 0)))))
           (when (< (p/code-count field) 3) (set! available false) 0))
         (p/code-list-push! migration `(store! ~migration-prefix ~(+ i 1)))))
     (p/code-list-push! out
@@ -99,6 +132,10 @@
             (let [~source (p/cast (ptr ~(p/code-nth prior 4)) old) ~target (p/cast (ptr ~type) raw)]
               ~@(p/code-list-done migration)) 0))
         (p/code-list-push! out
+          `(defn* ~value-migrate :jit/retain false
+            [(~old-value ~(p/code-nth prior 4))] (-> ~type)
+            (~type ~@(p/code-list-done values))))
+        (p/code-list-push! out
           `(defn* ~stage :jit/retain false :live/stage true [] (-> i64)
             (api/edge! ~logical ~(p/code-nth prior 3) ~version (p/fnptr-of ~prepare))))) 0)
     (p/code-list-done out)))
@@ -109,7 +146,7 @@
         value (p/fresh-identifier "root-value") initialize (p/fresh-identifier "root-initialize")
         registrar (p/fresh-identifier "state-root") reset-adapter (p/fresh-identifier "state-reset")
         constructor `(~(p/code-nth schema 1) ~type ~(p/code-nth schema 5))]
-    `((defn* ~value :jit/retain false :live/pure true [] (-> ~type) ~(syntax/constructor (p/code-nth record 4) constructor `(~constructor) '()))
+    `((defn* ~value :jit/retain false :lpc/preparation true [] (-> ~type) ~(syntax/constructor (p/code-nth record 4) constructor `(~constructor) '()))
       (defn* ~initialize :jit/retain false [(raw (ptr i8)) (prefix (ptr i64))] (-> i64)
         (store! (p/cast (ptr ~type) raw) (~value)) (store! prefix ~count) 0)
       ~@(if reset

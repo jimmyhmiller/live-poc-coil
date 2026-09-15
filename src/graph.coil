@@ -27,7 +27,13 @@
   (old-memory (slice u8)) (next-memory (slice u8)) (initialized i64)
   (prepare (fnptr c [(ptr i8) (ptr i8) (ptr relocation/Journal) (ptr i64)] i64))])
 (defstruct Savepoint [(epoch i64) (schemas i64) (edges i64) (handles i64) (roots i64)])
-(defstruct Heap [(allocator (dyn a/Allocator)) (schemas (al/ArrayList (ptr Schema)))
+;;; Additional validation for a prepared transaction. The caller owns context
+;;; through preparation; a nonzero result aborts the complete shadow graph.
+(defstruct Validation [(context (ptr i8))
+  (check (fnptr c [(ptr i8) (ptr Schema) (ptr i8)] i64))])
+(defn validate-schema [(context (ptr i8)) (schema (ptr Schema)) (payload (ptr i8))] (-> i64)
+  (p/call-ptr (.validate schema) payload))
+(defstruct Heap [(prepared-validation Validation) (allocator (dyn a/Allocator)) (schemas (al/ArrayList (ptr Schema)))
   (edges (al/ArrayList Edge)) (handles (al/ArrayList (ptr Handle)))
   (roots (al/ArrayList Root))
   (staged (al/ArrayList Staged)) (journal relocation/Journal)
@@ -36,6 +42,7 @@
 ;;; The session owns serialization and closes/drains layout admission first.
 (defn init! [(heap (ptr Heap)) (allocator (dyn a/Allocator))] (-> i64)
   (store! heap (p/zeroed Heap))
+  (set! (.prepared-validation heap) (Validation :context (p/cast (ptr i8) 0) :check (p/fnptr-of validate-schema)))
   (set! (.allocator heap) allocator)
   (set! (.schemas heap) (al/al-new [(ptr Schema)] allocator))
   (set! (.edges heap) (al/al-new [Edge] allocator))
@@ -226,7 +233,8 @@
       (for [i 0 (al/al-len (.staged heap))]
         (when (cancelled? cancel) (break :done 3))
         (let [item (al/al-get (.staged heap) i)
-              result (p/call-ptr (.validate (.next-schema item)) (payload (.next-memory item)))]
+              result (p/call-ptr (.check (field heap prepared-validation)) (.context (field heap prepared-validation))
+                (.next-schema item) (payload (.next-memory item)))]
           (when (!= result 0) (break :done result))))
       0)]
     (if (= status 0) (set! (.phase heap) 2) (abort! heap))

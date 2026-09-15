@@ -8,7 +8,7 @@
 
 ;;; Typed descriptor erased by the semantic transform before native execution.
 ;;; References carry the checker's identities, including aliases and hygiene.
-(defn describe [B H I] [(id i64) (name (slice u8)) (binding B)
+(defn describe [B N H I] [(id i64) (name (slice u8)) (binding B) (source-name N) (direct bool)
   (helper H) (implementation I) (condition i64)] (-> i64) 0)
 (extern lpc_stage_dependency :cc c [i64 i64] (-> i64))
 (extern lpc_stage_state_dependency :cc c [i64 i64] (-> i64))
@@ -24,7 +24,7 @@
   (and (p/code-list? decl) (and (>= (p/code-count decl) 4)
     (p/code-eq (p/code-nth decl 0) `decl))))
 (defn descriptor? [(form Code)] (-> bool)
-  (if (not (and (p/code-list? form) (= (p/code-count form) 7))) false
+  (if (not (and (p/code-list? form) (= (p/code-count form) 9))) false
     (let [decl (p/code-decl (p/code-nth form 0))]
       (and (declaration? decl)
         (p/code-eq (p/code-nth decl 3) `live-poc-coil.semantic.describe)))))
@@ -50,24 +50,26 @@
 (defn replace-registry [(registry Code) (descriptor Code)] (-> Code)
   (let [id (p/code-nth descriptor 1)
         binding (p/code-decl (p/code-nth descriptor 3))
-        helper (p/code-decl (p/code-nth descriptor 4))
+        helper (p/code-decl (p/code-nth descriptor 6))
         out (p/code-list-new)]
     (unless (declaration? binding)
       (p/error "live descriptor binding is not resolved") 0)
     (unless (declaration? helper)
-      (p/error (p/code-str "live descriptor helper is not resolved: " (p/code-nth descriptor 4))) 0)
+      (p/error (p/code-str "live descriptor helper is not resolved: " (p/code-nth descriptor 6))) 0)
     (let [pointer-type (p/code-nth (p/code-nth helper 4) 0)
-          item `(~(p/code-nth binding 1)
-                 ~(p/code-nth descriptor 3)
+          item `(~(p/code-str (p/code-nth binding 1))
+                 ~(p/code-nth descriptor 2)
                  ~(p/code-nth helper 3)
                  ~(p/code-nth pointer-type 2)
+                 ~(p/code-nth descriptor 5)
+                 ~(p/code-nth descriptor 3)
                  ~binding)]
       (for [i 0 (p/code-count registry)]
         (p/code-list-push! out (if (p/code-eq id `~i) item (p/code-nth registry i))))
       (when (p/code-eq id `~(p/code-count registry)) (p/code-list-push! out item) 0))
     (p/code-list-done out)))
 (defn implementation [(modules Code) (descriptor Code)] (-> Code)
-  (let [wanted (p/code-decl (p/code-nth descriptor 5))]
+  (let [wanted (p/code-decl (p/code-nth descriptor 7))]
     (block :found
       (for [mi 0 (p/code-count modules)]
         (let [module (p/code-nth modules mi)]
@@ -76,7 +78,7 @@
               (when (and (p/code-list? form) (and (>= (p/code-count form) 5)
                 (or (p/code-eq (p/code-nth form 0) `defn) (p/code-eq (p/code-nth form 0) `defn*))))
                 (when (p/bound-identifier=? (p/code-nth form 1)
-                        (p/code-nth (p/code-nth descriptor 5) 1))
+                        (p/code-nth (p/code-nth descriptor 7) 1))
                   (break :found form)))))))
       (p/error "live descriptor implementation is absent from the checked candidate"))))
 (defn syntax-head? [(head Code)] (-> bool)
@@ -106,7 +108,7 @@
     (when (declaration? decl)
       (for [i 0 (p/code-count registry)]
         (let [item (p/code-nth registry i)]
-          (when (and (>= (p/code-count item) 5) (references? decl (p/code-nth item 4)))
+          (when (and (>= (p/code-count item) 7) (references? decl (p/code-nth item 6)))
             (set! known true) (p/code-list-push! out `~i) 0)))
       ; An unanalysed function, extern or global may hide another live call.
       ; Preserve sound admission with an explicit conservative dependency on
@@ -133,9 +135,10 @@
   (if (descriptor? form)
     (let [binding (p/code-decl (p/code-nth form 3))
           outcome `(stage-source ~(p/code-str (p/code-nth binding 1))
-                      ~(p/code-nth form 2) ~(p/code-nth form 6)
-                      ~(policy/source-text candidate (p/code-nth binding 1) (p/code-nth form 3)))]
-    (if (p/code-eq (p/code-nth form 6) `0)
+                      ~(p/code-nth form 2) ~(p/code-nth form 8)
+                      ~(policy/source-text candidate (p/code-nth binding 1)
+                        (p/code-nth (p/code-nth form 4) 1)))]
+    (if (p/code-eq (p/code-nth form 8) `0)
       (let [dependencies (p/code-list-new) states (p/code-list-new) calls (p/code-list-new)
             id (p/code-nth form 1) implementation (implementation modules form) (mut opaque) false]
         (let [(mut body-start) -1]
@@ -153,14 +156,14 @@
           (for [i 0 (p/code-count ids)]
             (p/code-list-push! calls `(lpc_stage_state_dependency ~id ~(p/code-nth ids i)))))
         (when (load opaque) (p/code-list-push! calls `(lpc_stage_opaque ~id)) 0)
-        `(do (~(p/code-nth (p/code-nth form 4) 1) ~(p/code-nth form 5))
+        `(do (~(p/code-nth (p/code-nth form 6) 1) ~(p/code-nth form 7))
              ~@(p/code-list-done calls) ~outcome 0))
       ; type-of reads the checked prototype's full pointer type. Calling the
       ; retained typed staging helper with a null of that type rechecks ABI
       ; compatibility without emitting a reference to the absent implementation.
-      `(do (~(p/code-nth (p/code-nth form 4) 1)
-             (p/cast ~(p/type-of (p/code-nth form 5)) (p/cast (ptr i8) 0)))
-           (lpc_stage_blocked ~(p/code-nth form 1) ~(p/code-nth form 6)) ~outcome 0)))
+      `(do (~(p/code-nth (p/code-nth form 6) 1)
+             (p/cast ~(p/type-of (p/code-nth form 7)) (p/cast (ptr i8) 0)))
+           (lpc_stage_blocked ~(p/code-nth form 1) ~(p/code-nth form 8)) ~outcome 0)))
     (if (p/code-list? form)
       (let [out (p/code-list-new)]
         (for [i 0 (p/code-count form)]
@@ -173,9 +176,9 @@
     (unless (p/code-eq (p/code-nth form 0) `extern) (break :found false))
     (for [i 0 (p/code-count descriptors)]
       (let [descriptor (p/code-nth descriptors i)]
-        (when (and (not (p/code-eq (p/code-nth descriptor 6) `0))
+        (when (and (not (p/code-eq (p/code-nth descriptor 8) `0))
                    (p/bound-identifier=? (p/code-nth form 1)
-                     (p/code-nth (p/code-nth descriptor 5) 1)))
+                     (p/code-nth (p/code-nth descriptor 7) 1)))
           (break :found true))))
     false))
 (defn transform [(modules Code)] (-> Code)
@@ -203,4 +206,3 @@
             (p/code-list-push! out (p/code-list-done next))))
         (p/code-session-stage! (policy/with-functions (load candidate) (load registry)))
         `(do ~@(p/code-list-done out))))))
-

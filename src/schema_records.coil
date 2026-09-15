@@ -3,7 +3,6 @@
 (import "live-poc-coil.policy-state" :as policy)
 (import "live-poc-coil.syntax-rewrite" :as syntax)
 
-(defannotation :live/state bool)
 ;;; Schema record: (module authored-name logical-id version physical-name fields source transitions descriptor).
 ;;; Root record: (module authored-name root-id logical-id initializer-source).
 (defn lookup [(records Code) (module Code) (name Code)] (-> i64)
@@ -19,31 +18,53 @@
       (p/code-list-push! out (if (= i index) next (p/code-nth records i))))
     (when (= index (p/code-count records)) (p/code-list-push! out next) 0)
     (p/code-list-done out)))
-(defn managed? [(form Code)] (-> bool)
+(defn physical-name [(name Code) (version i64)] (-> Code)
+  (let [parsed (p/code-read (p/code-str name "-live-v" version) '(reader-config))]
+    (unless (and (= (p/code-count parsed) 2) (p/code-sym? (p/code-nth parsed 1)))
+      (p/error "schema physical name could not be represented as an identifier") 0)
+    (p/code-nth parsed 1)))
+(defn schema? [(form Code)] (-> bool) (syntax/head? form `defstruct))
+(defn dependency-versions [(schemas Code) (module Code) (fields Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [fi 0 (p/code-count fields)]
+      (let [type (p/code-nth (p/code-nth fields fi) 1)]
+        (when (p/code-sym? type)
+          (for [si 0 (p/code-count schemas)]
+            (let [dep (p/code-nth schemas si)]
+              (when (and (p/code-eq (p/code-nth dep 0) module)
+                         (= (p/code-str (p/code-nth dep 1)) (p/code-str type)))
+                (p/code-list-push! out `(~(p/code-nth dep 2) ~(p/code-nth dep 3))) 0))))))
+    (p/code-list-done out)))
+(defn dependencies-current? [(record Code) (schemas Code)] (-> bool)
+  (and (> (p/code-count record) 9)
+    (p/code-eq (p/code-nth record 9)
+      (dependency-versions schemas (p/code-nth record 0) (p/code-nth record 5)))))
+(defn physical? [(state Code) (module Code) (form Code)] (-> bool)
   (block :found
-    (unless (syntax/head? form `defstruct) (break :found false))
-    (for [i 2 (p/code-count form)]
-      (when (p/code-vector? (p/code-nth form i)) (break :found false))
-      (when (and (p/code-eq (p/code-nth form i) `:live/state)
-        (< (+ i 1) (p/code-count form)))
-        (break :found (p/code-eq (p/code-nth form (+ i 1)) `true))))
+    (unless (schema? form) (break :found false))
+    (let [items (p/code-nth state 2)]
+    (for [i 0 (p/code-count items)]
+      (let [record (p/code-nth items i)]
+        (when (and (p/code-eq (p/code-nth record 0) module)
+          (= (p/code-str (p/code-nth form 1)) (p/code-str (p/code-nth record 4))))
+          (break :found true)))))
     false))
 (defn fields [(form Code)] (-> Code)
   (unless (and (p/code-list? form) (>= (p/code-count form) 3))
-    (p/error "managed schema requires a named record and field vector") 0)
+    (p/error "schema requires a named record and field vector") 0)
   (let [fields (p/code-nth form (- (p/code-count form) 1))]
-    (unless (p/code-vector? fields) (p/error "managed schema requires a field vector") 0)
+    (unless (p/code-vector? fields) (p/error "schema requires a field vector") 0)
     (for [i 2 (- (p/code-count form) 1)]
       (when (p/code-eq (p/code-nth form i) `:jit/retain)
-        (p/error "managed schemas own physical type lifetime; omit :jit/retain") 0)
+        (p/error "schema versions own physical type lifetime; omit :jit/retain") 0)
       (when (p/code-vector? (p/code-nth form i))
-        (p/error "managed generic schemas require a generic value policy") 0))
+        (p/error "generic schemas require a generic value policy") 0))
     (for [i 0 (p/code-count fields)]
       (let [field (p/code-nth fields i)]
         (unless (and (p/code-list? field)
           (and (or (= (p/code-count field) 2) (= (p/code-count field) 3))
                (p/code-sym? (p/code-nth field 0))))
-          (p/error "managed fields require (name Type) or (name Type default)") 0)))
+          (p/error "schema fields require (name Type) or (name Type default)") 0)))
     fields))
 (defn propose! [(state (ptr Code)) (module Code) (form Code)] (-> i64)
   (let [items (policy/schemas (load state)) name (p/code-nth form 1)
@@ -51,48 +72,58 @@
         index (if (< known 0) (p/code-count items) known)]
     (block :done
       (when (>= known 0)
-        (when (p/code-eq (p/code-nth (p/code-nth items known) 6) form) (break :done -1)))
+        (when (and (p/code-eq (p/code-nth (p/code-nth items known) 6) form)
+                   (dependencies-current? (p/code-nth items known) items))
+          (break :done -1)))
       (let [logical (if (< known 0) (+ index 1) (p/code-int (p/code-nth (p/code-nth items known) 2)))
             version (if (< known 0) 1 (+ (p/code-int (p/code-nth (p/code-nth items known) 3)) 1))
             prepared-fields (p/code-list-new)
-            physical (p/fresh-identifier (p/code-str name))]
+            physical (physical-name name version)]
         (for [i 0 (p/code-count fields)]
           (let [field (p/code-nth fields i)]
             (p/code-list-push! prepared-fields
               (if (= (p/code-count field) 3)
                 `(~@field ~(p/fresh-identifier "state-default")) field))))
+        (let [prepared (p/code-list-done prepared-fields)]
         (store! state (policy/with-state (load state)
           (replace items index `(~module ~name ~logical ~version ~physical
-            [~@(p/code-list-done prepared-fields)] ~form
+            [~@prepared] ~form
             ~(if (and (>= known 0) (> (p/code-count (p/code-nth items known)) 7))
               (p/code-nth (p/code-nth items known) 7) '())
-            ~(p/fresh-identifier "state-descriptor")))
-          (policy/roots (load state)))))
+            ~(p/fresh-identifier "state-descriptor")
+            ~(dependency-versions items module prepared)
+            ~(p/fresh-identifier "state-value-convert")))
+          (policy/roots (load state))))))
       index)))
-(defn physical-definition [(record Code)] (-> Code)
+(defn physical-definition-with [(schemas Code) (record Code)] (-> Code)
   (let [source (p/code-nth record 6) fields (p/code-nth record 5)
-        options (p/code-list-new) clean (p/code-list-new) (mut skip) false]
+        options (p/code-list-new) clean (p/code-list-new) mapping (p/code-list-new)]
+    (for [i 0 (p/code-count schemas)]
+      (let [candidate (p/code-nth schemas i)]
+        (when (p/code-eq (p/code-nth candidate 0) (p/code-nth record 0))
+          (p/code-list-push! mapping `(~(p/code-nth candidate 1) ~(p/code-nth candidate 4))) 0)))
+    (let [type-map (p/code-list-done mapping)]
     (for [i 2 (- (p/code-count source) 1)]
-      (if (load skip) (do (set! skip false) 0)
-        (if (p/code-eq (p/code-nth source i) `:live/state)
-          (do (set! skip true) 0)
-          (do (p/code-list-push! options (p/code-nth source i)) 0))))
+      (p/code-list-push! options (p/code-nth source i)))
     (for [i 0 (p/code-count fields)]
       (let [field (p/code-nth fields i)]
-        (p/code-list-push! clean `(~(p/code-nth field 0) ~(p/code-nth field 1)))))
-    `(defstruct ~(p/code-nth record 4) :jit/retain false ~@(p/code-list-done options) [~@(p/code-list-done clean)])))
+        (p/code-list-push! clean `(~(p/code-nth field 0)
+          ~(syntax/rewrite (p/code-nth field 1) type-map '())))))
+    `(defstruct ~(p/code-nth record 4) :jit/retain false ~@(p/code-list-done options) [~@(p/code-list-done clean)]))))
+(defn physical-definition [(record Code)] (-> Code)
+  (physical-definition-with `(~record) record))
 (defn root? [(form Code)] (-> bool) (syntax/head? form `letonce))
 (defn propose-root! [(state (ptr Code)) (module Code) (form Code)] (-> i64)
   (unless (and (= (p/code-count form) 3) (p/code-sym? (p/code-nth form 1)))
-    (p/error "managed root requires (letonce name (ManagedType ...))") 0)
+    (p/error "persistent root requires (letonce name (ManagedType ...))") 0)
   (let [name (p/code-nth form 1) initializer (p/code-nth form 2)
         roots (policy/roots (load state)) schemas (policy/schemas (load state))]
     (unless (and (p/code-list? initializer) (and (> (p/code-count initializer) 0)
       (p/code-sym? (p/code-nth initializer 0))))
-      (p/error "managed root requires an explicit managed constructor") 0)
+      (p/error "persistent root requires an explicit managed constructor") 0)
     (let [type (lookup schemas module (p/code-nth initializer 0))
           known (lookup roots module name) index (if (< known 0) (p/code-count roots) known)]
-      (when (< type 0) (p/error "managed root requires a known managed constructor in its module") 0)
+      (when (< type 0) (p/error "persistent root requires a known managed constructor in its module") 0)
       (let [schema (p/code-nth schemas type) logical (p/code-nth schema 2)
             id (if (< known 0) (+ index 1) (p/code-int (p/code-nth (p/code-nth roots known) 2)))]
         (when (>= known 0)
@@ -109,7 +140,7 @@
   (unless (and (= (p/code-count form) 3) (p/code-sym? (p/code-nth form 1)))
     (p/error "reset-state! requires a root name and explicit managed constructor") 0)
   (let [roots (policy/roots state) index (lookup roots module (p/code-nth form 1))]
-    (when (< index 0) (p/error "reset-state! requires an existing managed root") 0)
+    (when (< index 0) (p/error "reset-state! requires an existing persistent root") 0)
     (let [root (p/code-nth roots index) (mut schema) '() initializer (p/code-nth form 2)]
       (for [i 0 (p/code-count (policy/schemas state))]
         (let [candidate (p/code-nth (policy/schemas state) i)]

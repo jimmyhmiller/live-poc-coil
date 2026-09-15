@@ -1,0 +1,605 @@
+{
+  "passed": true,
+  "cleanup_errors": [],
+  "revision": "90113044913a00a73850e9a4ea781a4e99c49e87",
+  "worktree_status": " M README.md\n M docs/MOVING_PAPER.md\n M docs/PLAN.md\n M docs/SCHEMAS.md\n M scripts/test_protocol.py\n M src/graph.coil\n M src/managed.coil\n M tests/graph_test.coil\n?? docs/measurements/paper-migration-failure.json\n?? scripts/test_paper_failure.py\n?? src/fault_allocator.coil\n?? tests/fault_allocator_test.coil\n",
+  "fixture_sha256": "f466960ff020e574596493e9ffd55e10e80fa2ef486fe34aebecc80028ea6880",
+  "host_sha256": "892db569e499a1433e7fe0e5a7cba523d26405c8819f7ff63bd3255824d43b05",
+  "compiler_sha256": "10db066ef6c600c2d3d01c6bda43607c6c9a74e352f384b31ae279c72df16041",
+  "records": [
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(extern test-fail :as \"lpc_test_payload_failure\" :cc c [i64] (-> i64))\n(extern test-hits :as \"lpc_test_payload_failures\" :cc c [] (-> i64))\n(extern test-validation-fail :as \"lpc_test_validation_failure\" :cc c [i64] (-> i64))\n(extern test-validation-hits :as \"lpc_test_validation_failures\" :cc c [] (-> i64))",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-1",
+        "session": "application",
+        "revision": "2",
+        "ns": "moving-demo",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-hits)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-2",
+        "session": "application",
+        "revision": "3",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.velocity world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-3",
+        "session": "application",
+        "revision": "4",
+        "ns": "moving-demo",
+        "value": "-70.0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(do (set! (.velocity world) 0.0) (set! (.clicks world) 7) (set! (.clicks controls) 13))",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-4",
+        "session": "application",
+        "revision": "5",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.x world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-5",
+        "session": "application",
+        "revision": "6",
+        "ns": "moving-demo",
+        "value": "218.181781",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(p/cast i64 world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-6",
+        "session": "application",
+        "revision": "7",
+        "ns": "moving-demo",
+        "value": "4369855392",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(p/sizeof State)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-7",
+        "session": "application",
+        "revision": "8",
+        "ns": "moving-demo",
+        "value": "40",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-8",
+        "session": "application",
+        "revision": "9",
+        "ns": "moving-demo",
+        "value": "7",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks controls)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-9",
+        "session": "application",
+        "revision": "10",
+        "ns": "moving-demo",
+        "value": "13",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-fail 1)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-10",
+        "session": "application",
+        "revision": "11",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "status",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-11",
+        "session": "application",
+        "compiler-queued": "0",
+        "revision": "11",
+        "schema-epoch": "1",
+        "state-phase": "0",
+        "state-condition": "0",
+        "now": "3056858.999996376",
+        "queued-input": "0",
+        "completed-input": "1368",
+        "cancelled-input": "0",
+        "rejected-input": "0",
+        "coalesced-input": "0",
+        "pending-input": {},
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(defstruct State :live/state true\n[(x f64 150.0) (velocity f64 70.0) (last f64 0.0)\n (visible bool true) (clicks i64 0) (weight f64 2.0)])",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-12",
+        "session": "application",
+        "err": "error: compiler session candidate failed during native publication\n",
+        "status": [
+          "error",
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "status",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-13",
+        "session": "application",
+        "compiler-queued": "0",
+        "revision": "11",
+        "schema-epoch": "1",
+        "state-phase": "0",
+        "state-condition": "0",
+        "now": "3056859.033758042",
+        "queued-input": "0",
+        "completed-input": "1370",
+        "cancelled-input": "0",
+        "rejected-input": "0",
+        "coalesced-input": "0",
+        "pending-input": {},
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-hits)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-14",
+        "session": "application",
+        "revision": "12",
+        "ns": "moving-demo",
+        "value": "1",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.x world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-15",
+        "session": "application",
+        "revision": "13",
+        "ns": "moving-demo",
+        "value": "218.181781",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(p/cast i64 world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-16",
+        "session": "application",
+        "revision": "14",
+        "ns": "moving-demo",
+        "value": "4369855392",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(p/sizeof State)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-17",
+        "session": "application",
+        "revision": "15",
+        "ns": "moving-demo",
+        "value": "40",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-18",
+        "session": "application",
+        "revision": "16",
+        "ns": "moving-demo",
+        "value": "7",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks controls)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-19",
+        "session": "application",
+        "revision": "17",
+        "ns": "moving-demo",
+        "value": "13",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-validation-hits)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-20",
+        "session": "application",
+        "revision": "18",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-validation-fail 1)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-21",
+        "session": "application",
+        "revision": "19",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "status",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-22",
+        "session": "application",
+        "compiler-queued": "0",
+        "revision": "19",
+        "schema-epoch": "1",
+        "state-phase": "0",
+        "state-condition": "0",
+        "now": "3056860.065874584",
+        "queued-input": "0",
+        "completed-input": "1432",
+        "cancelled-input": "0",
+        "rejected-input": "0",
+        "coalesced-input": "0",
+        "pending-input": {},
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(defstruct State :live/state true\n[(x f64 150.0) (velocity f64 70.0) (last f64 0.0)\n (visible bool true) (clicks i64 0) (weight f64 2.0)])",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-23",
+        "session": "application",
+        "err": "error: compiler session candidate failed during native publication\n",
+        "status": [
+          "error",
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "status",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-24",
+        "session": "application",
+        "compiler-queued": "0",
+        "revision": "19",
+        "schema-epoch": "1",
+        "state-phase": "0",
+        "state-condition": "0",
+        "now": "3056860.099403626",
+        "queued-input": "0",
+        "completed-input": "1434",
+        "cancelled-input": "0",
+        "rejected-input": "0",
+        "coalesced-input": "0",
+        "pending-input": {},
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-validation-hits)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-25",
+        "session": "application",
+        "revision": "20",
+        "ns": "moving-demo",
+        "value": "1",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.x world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-26",
+        "session": "application",
+        "revision": "21",
+        "ns": "moving-demo",
+        "value": "218.181781",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(p/cast i64 world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-27",
+        "session": "application",
+        "revision": "22",
+        "ns": "moving-demo",
+        "value": "4369855392",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(p/sizeof State)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-28",
+        "session": "application",
+        "revision": "23",
+        "ns": "moving-demo",
+        "value": "40",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-29",
+        "session": "application",
+        "revision": "24",
+        "ns": "moving-demo",
+        "value": "7",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks controls)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-30",
+        "session": "application",
+        "revision": "25",
+        "ns": "moving-demo",
+        "value": "13",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(defstruct State :live/state true\n[(x f64 150.0) (velocity f64 70.0) (last f64 0.0)\n (visible bool true) (clicks i64 0) (weight f64 2.0)])",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-31",
+        "session": "application",
+        "revision": "26",
+        "ns": "moving-demo",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.weight world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-32",
+        "session": "application",
+        "revision": "27",
+        "ns": "moving-demo",
+        "value": "2.0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.x world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-33",
+        "session": "application",
+        "revision": "28",
+        "ns": "moving-demo",
+        "value": "218.181781",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks world)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-34",
+        "session": "application",
+        "revision": "29",
+        "ns": "moving-demo",
+        "value": "7",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(.clicks controls)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-35",
+        "session": "application",
+        "revision": "30",
+        "ns": "moving-demo",
+        "value": "13",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-fail -1)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-36",
+        "session": "application",
+        "revision": "31",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(test-validation-fail -1)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-37",
+        "session": "application",
+        "revision": "32",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    },
+    {
+      "op": "eval",
+      "ns": "moving-demo",
+      "code": "(set! (.velocity world) -70.0)",
+      "reply": {
+        "id": "client-b89f9b5393ad42d4be7176af401237b3-38",
+        "session": "application",
+        "revision": "33",
+        "ns": "moving-demo",
+        "value": "0",
+        "status": [
+          "done"
+        ]
+      }
+    }
+  ]
+}

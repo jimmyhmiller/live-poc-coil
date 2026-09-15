@@ -1,10 +1,10 @@
-# Source lowering for managed schemas
+# Source lowering for schema versions
 
 This is the next implementation layer. The native bridge works with explicit generated-adapter fixtures; the ordinary source transform below is not implemented yet.
 
 ## Required source behavior
 
-Opted-in record declarations produce distinct physical versions. Root declarations preserve identity, and re-evaluating an initializer does not reset an existing root. A layout change rechecks the affected function closure, derives justified field copies/defaults, and requires explicit transitions for retyped fields. A failed migration preserves the accepted heap. Repair must compose with the desired source while migrating from the actual accepted version.
+Every record declaration in the live program produces distinct physical versions. Root declarations preserve identity, and re-evaluating an initializer does not reset an existing root. A layout change rechecks the affected function closure, derives justified field copies/defaults, and requires explicit transitions for retyped fields. A failed migration preserves the accepted heap. Repair must compose with the desired source while migrating from the actual accepted version.
 
 ## Compiler constraints established locally
 

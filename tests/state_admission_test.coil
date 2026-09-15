@@ -34,8 +34,8 @@
 
 (deftest missing-schema-transition-pauses-only-dependent-native-roots
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module selective-state) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State :live/state true [(visible bool true) (value i64 7)]) (defstruct Other :live/state true [(value i64 19)]) (letonce world (State :value 42)) (letonce other (Other)) (defn affected [] (-> i64) (.value world)) (defn unaffected [] (-> i64) (.value other)) (defn caller [] (-> i64) (affected))") 0))
-  (assert (!= (session/submit-deferred! "(module selective-state) (defstruct State :live/state true [(visible Visibility (Visible)) (value i64 7)])") 0))
+  (assert (= (session/submit! "(module selective-state) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State [(visible bool true) (value i64 7)]) (defstruct Other [(value i64 19)]) (letonce world (State :value 42)) (letonce other (Other)) (defn affected [] (-> i64) (.value world)) (defn unaffected [] (-> i64) (.value other)) (defn caller [] (-> i64) (affected))") 0))
+  (assert (!= (session/submit-deferred! "(module selective-state) (defstruct State [(visible Visibility (Visible)) (value i64 7)])") 0))
   (let [runtime (field (session/instance) runtime)]
     (assert (not (.layout-closed runtime)))
     (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))
@@ -70,10 +70,10 @@
     (assert (= (session/init!) 0))
     (let [runtime (field (session/instance) runtime)]
       (set! (.alc (field runtime state-conditions)) (p/make-dyn a/Allocator allocator))
-      (assert (!= (session/submit-deferred! "(module failed-state) (import \"live-poc-coil.meta\") (defstruct State :live/state true [(value i64 42)]) (letonce world (State)) (defn value [] (-> i64) (.value world))") 0))
+      (assert (!= (session/submit-deferred! "(module failed-state) (import \"live-poc-coil.meta\") (defstruct State [(value i64 42)]) (letonce world (State)) (defn value [] (-> i64) (.value world))") 0))
       (assert (= (.global-state-condition runtime) -4))
       (set! (.remaining allocator) -1)
-      (assert (= (session/submit! "(module independent-state) (import \"live-poc-coil.meta\") (defstruct Other :live/state true [(value i64 19)]) (letonce other (Other)) (defn value [] (-> i64) (.value other))") 0))
+      (assert (= (session/submit! "(module independent-state) (import \"live-poc-coil.meta\") (defstruct Other [(value i64 19)]) (letonce other (Other)) (defn value [] (-> i64) (.value other))") 0))
       (assert (= (.global-state-condition runtime) -4))
       (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))
       (assert (= (session/submit! "(module failed-state) (letonce world (State))") 0))

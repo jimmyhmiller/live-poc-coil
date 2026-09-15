@@ -6,7 +6,7 @@
 ;;; Pure defaults and field transitions are value computations. This checked
 ;;; subset admits plain records/sums, immutable locals and checked helpers.
 ;;; Resource-bearing value policies have a separate owned preparation ABI.
-(defannotation :live/pure bool)
+(defannotation :lpc/preparation bool)
 (defn scalar? [(type Code)] (-> bool)
   (let [types '(bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64)]
     (block :found
@@ -39,11 +39,12 @@
     (unless (or (syntax/head? form `defn) (syntax/head? form `defn*)) (break :found false))
     (for [i 2 (p/code-count form)]
       (when (p/code-vector? (p/code-nth form i)) (break :found false))
-      (when (and (p/code-eq (p/code-nth form i) `:live/pure)
+      (when (and (p/code-eq (p/code-nth form i) `:lpc/preparation)
         (p/code-eq (p/code-nth form (+ i 1)) `true)) (break :found true)))
     false))
 (defn declaration? [(decl Code)] (-> bool)
-  (and (syntax/head? decl `decl) (>= (p/code-count decl) 4)))
+  (and (p/code-list? decl) (and (>= (p/code-count decl) 4)
+    (= (p/code-str (p/code-nth decl 0)) "decl"))))
 (defn accepted-default? [(decl Code)] (-> bool)
   ; Accepted schema metadata certifies these exact generated helpers: their
   ; bodies and closed helper dependencies passed this checker before commit.
@@ -111,12 +112,14 @@
     :else
       (let [decl (p/code-decl form)]
         (cond
-          (or (helper? decl helpers) (accepted-default? decl)) (arguments! form 1 bound helpers)
+          (or (helper? decl helpers) (accepted-default? decl))
+            (arguments! form 1 bound helpers)
           (and (declaration? decl)
             (or (p/code-eq (p/code-nth decl 2) `struct) (p/code-eq (p/code-nth decl 2) `sum)))
             (do
               (unless (plain? (p/type-of form) 0)
-                (p/report form "pure construction requires a plain value policy") 0)
+                (p/report form (p/code-str "pure construction requires a plain value policy, got "
+                  (p/code-str (p/type-of form)))) 0)
               (arguments! form 1 bound helpers))
           ; Field projection is a load from a checked plain input value. Raw
           ; loads, address-taking and arbitrary pointer reads are not admitted.
@@ -126,6 +129,12 @@
               (if (and (p/code-sym? head) (plain? (p/type-of base) 0))
                 (expression! base bound helpers)
                 (do (p/report form "pure preparation cannot read raw storage") 0)))
+          (and (declaration? decl) (and (= (p/code-count form) 2)
+            (= (p/code-str (p/code-nth decl 3)) "coil.primitive.field")))
+            (do
+              (unless (and (plain? (p/type-of form) 0) (plain? (p/type-of (p/code-nth form 1)) 0))
+                (p/report form "pure preparation field projection requires plain values") 0)
+              (expression! (p/code-nth form 1) bound helpers))
           (and (not (declaration? decl)) (arithmetic? form)) (arguments! form 1 bound helpers)
           :else (do (p/report form "pure preparation cannot call unchecked functions or perform effects") 0))))
   0)
@@ -158,6 +167,7 @@
       (let [helper (p/code-nth helpers i)
             target (p/code-decl (p/code-nth (p/code-nth helpers i) 1))]
         (when (and (declaration? target) (p/code-eq (p/code-nth target 3) name))
+          (function! helper helpers)
           (helper-body-cycles! helper helpers `(~@path ~name) complete) 0)))
     (store! complete `(~@(load complete) ~name)) 0))
 (defn helper-cycle! [(form Code) (helpers Code) (path Code) (complete (ptr Code))] (-> i64)
@@ -175,13 +185,17 @@
       (for [i (load at) (p/code-count form)]
         (helper-cycle! (p/code-nth form i) helpers path complete)))) 0)
 (defn check [(modules Code)] (-> Code)
-  (let [out (p/code-list-new)]
+  (let [definitions-out (p/code-list-new) roots-out (p/code-list-new)]
     (for [mi 0 (p/code-count modules)]
       (let [m (p/code-nth modules mi)]
         (for [fi 1 (p/code-count m)]
-          (when (selected? (p/code-nth m fi)) (p/code-list-push! out (p/code-nth m fi)) 0))))
-    (let [helpers (p/code-list-done out) (mut complete) '()]
-      (for [i 0 (p/code-count helpers)]
-        (function! (p/code-nth helpers i) helpers)
-        (helper-body-cycles! (p/code-nth helpers i) helpers '() (mut complete)))))
+          (let [form (p/code-nth m fi)]
+            (when (or (syntax/head? form `defn) (syntax/head? form `defn*))
+              (p/code-list-push! definitions-out form) 0)
+            (when (selected? form) (p/code-list-push! roots-out form) 0)))))
+    (let [definitions (p/code-list-done definitions-out) roots (p/code-list-done roots-out)
+          (mut complete) '()]
+      (for [i 0 (p/code-count roots)]
+        (function! (p/code-nth roots i) definitions)
+        (helper-body-cycles! (p/code-nth roots i) definitions '() (mut complete)))))
   `(do ~@modules))

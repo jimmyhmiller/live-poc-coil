@@ -96,9 +96,10 @@
           (replace! (field f diagnostic) (.diagnostic ledger))))))
   0)
 (defn stage-condition! [(ledger (ptr Ledger)) (module (slice u8)) (name (slice u8)) (condition i64)] (-> i64)
-  (let [index (find ledger module "defn" name)]
-    (assert (>= index 0))
-    (let [form (al/al-elem [Form] (field ledger forms) index)]
+  (let [(mut index) (find ledger module "defn" name)]
+    (when (< (load index) 0) (set! index (find ledger module "defn*" name)) 0)
+    (assert (>= (load index) 0))
+    (let [form (al/al-elem [Form] (field ledger forms) (load index))]
       (assert (= (.attempt form) (.attempt ledger)))
       (set! (.condition form) condition)))
   0)

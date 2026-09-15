@@ -127,8 +127,65 @@
   (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 1)") 0))
   (assert (!= (s/submit! "(module demo) (defn f [] (-> i64))") 0))
   (assert (!= (s/submit! "(module demo) (defn f :inline true [] (-> i64) 2)") 0))
-  (assert (!= (s/submit! "(module demo) (defn f [T] [(x T)] (-> T) x)") 0))
   (let [v (s/enter!)] (assert (= (.revision v) 1)) (assert (= (value 0) 1)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest attributed-and-generic-definitions-update-without-opt-in
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module definitions) (import \"live-poc-coil.meta\") (defn scaled :inline (Always) [(x i64)] (-> i64) (+ x 1)) (defn identity [T] [(x T)] (-> T) x) (defn answer [] (-> i64) (scaled (identity 20)))") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 21)) (s/leave!))
+  (assert (= (s/submit! "(module definitions) (defn scaled :inline (Never) [(x i64)] (-> i64) (+ x 2))") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 22)) (s/leave!))
+  (assert (= (s/submit! "(module definitions) (defn identity [T] [(x T)] (-> T) (do x x))") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 22)) (s/leave!))
+  (assert (!= (s/submit! "(module definitions) (defn identity [T] [(x T)] (-> T) true)") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 22)) (s/leave!))
+  (assert (= (s/submit! "(module definitions) (defn identity [T] [(x T)] (-> T) x)") 0))
+  (let [v (s/enter!)] (assert (= (value 1) 22)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest direct-definitions-update-without-opt-in
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module direct-definitions) (import \"live-poc-coil.meta\") (defn* increment [(x i64)] (-> i64) (+ x 1)) (defn answer [] (-> i64) (increment 20))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 21)) (s/leave!))
+  (assert (= (s/submit! "(module direct-definitions) (defn* increment [(x i64)] (-> i64) (+ x 2))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 22)) (s/leave!))
+  (assert (!= (s/submit! "(module direct-definitions) (defn* increment [(x i64)] (-> i64) true)") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 22)) (s/leave!))
+  (assert (= (s/submit! "(module direct-definitions) (defn* increment [(x i64)] (-> i64) (+ x 3))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 23)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest sum-definitions-update-without-opt-in
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module sum-definitions) (import \"live-poc-coil.meta\") (defsum Result (Ok [(value i64)]) (Err)) (defn answer [] (-> i64) (match (Ok 21) (Ok [value] value) (Err [] 0)))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 21)) (s/leave!))
+  (assert (= (s/submit! "(module sum-definitions) (defsum Result (Ok [(value i64)]) (Err) (Pending)) (defn answer [] (-> i64) (match (Ok 22) (Ok [value] value) (Err [] 0) (Pending [] -1)))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 22)) (s/leave!))
+  (assert (!= (s/submit! "(module sum-definitions) (defsum Result (Ok [(value bool)]) (Err) (Pending)) (defn answer [] (-> i64) (match (Ok 23) (Ok [value] value) (Err [] 0) (Pending [] -1)))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 22)) (s/leave!))
+  (assert (= (s/submit! "(module sum-definitions) (defsum Result (Ok [(value i64)]) (Err) (Pending) (Cancelled)) (defn answer [] (-> i64) (match (Ok 24) (Ok [value] value) (Err [] 0) (Pending [] -1) (Cancelled [] -2)))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 24)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest generic-sum-definitions-update-without-opt-in
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module generic-sums) (import \"live-poc-coil.meta\") (defsum Option [T] (None) (Some [(value T)])) (defn answer [] (-> i64) (match (Some 31) (None [] 0) (Some [value] value)))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 31)) (s/leave!))
+  (assert (= (s/submit! "(module generic-sums) (defsum Option [T] (None) (Some [(value T)]) (Pending)) (defn answer [] (-> i64) (match (Some 32) (None [] 0) (Some [value] value) (Pending [] -1)))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 32)) (s/leave!))
+  (assert (= (s/close!) 0)))
+
+(deftest globals-and-constants-update-without-opt-in
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module global-definitions) (import \"live-poc-coil.meta\") (const OFFSET 1) (def base 20) (defn answer [] (-> i64) (+ OFFSET base))") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 21)) (s/leave!))
+  (assert (= (s/submit! "(module global-definitions) (const OFFSET 2)") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 22)) (s/leave!))
+  (assert (!= (s/submit! "(module global-definitions) (const OFFSET true)") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 22)) (s/leave!))
+  (assert (= (s/submit! "(module global-definitions) (def base 30)") 0))
+  (let [v (s/enter!)] (assert (= (value 0) 32)) (s/leave!))
   (assert (= (s/close!) 0)))
 
 (deftest typed-evaluation-runs-after-publication

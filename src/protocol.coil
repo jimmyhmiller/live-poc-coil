@@ -118,10 +118,12 @@
         (= (.op request) "source")
           (do (session/metadata-lock!)
           (let [ledger (field (session/instance) sources)
-                index (source/find ledger ns "defn" (.symbol request))]
-            (if (< index 0)
+                (mut index) (source/find ledger ns "defn" (.symbol request))]
+            (when (< (load index) 0)
+              (set! index (source/find ledger ns "defn*" (.symbol request))) 0)
+            (if (< (load index) 0)
               (failure! (mut response) "unknown live function")
-              (let [f (al/al-get (.forms ledger) index)]
+              (let [f (al/al-get (.forms ledger) (load index))]
                 (b/response-string! (mut response) "desired" (.desired f))
                 (b/response-string! (mut response) "accepted" (.accepted f))
                 (b/response-string! (mut response) "diagnostic" (.diagnostic f))

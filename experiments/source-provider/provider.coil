@@ -25,7 +25,7 @@
             0)
           (do
             (unless (load have-module) (p/error "live submissions require an explicit module declaration") 0)
-            ; The host's source policy replaces the original opt-in transform.
+            ; The host's source policy replaces the original source transform.
             (unless (and (head? f `import) (p/code-eq (p/code-nth f 1) `"live-poc-coil.meta"))
               (p/code-list-push! (load current) f) 0)
             0))))

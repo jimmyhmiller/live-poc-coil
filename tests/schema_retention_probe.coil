@@ -13,13 +13,13 @@
     (match (str/str-parse-int (str/cstr->str (load (p/index argv 1)))) (Some [n] n) (None [] 0)) 1000)]
   (assert (and (> count 0) (<= count 100000)))
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module schema-soak) (import \"live-poc-coil.meta\") (defstruct State :live/state true [(value i64 7) (added i64 77)]) (letonce world (State :value 42)) (defn value [] (-> i64) (.value world))") 0))
+  (assert (= (session/submit! "(module schema-soak) (import \"live-poc-coil.meta\") (defstruct State [(value i64 7) (added i64 77)]) (letonce world (State :value 42)) (defn value [] (-> i64) (.value world))") 0))
   (let [heap (field (managed/state) heap) root (graph/root heap 1)]
     (for [i 0 count]
       (let [even (= (% i 2) 0)]
         (assert (= (session/submit! (if even
-          "(module schema-soak) (defstruct State :live/state true [(added i64 88) (value i64 7)])"
-          "(module schema-soak) (defstruct State :live/state true [(value i64 7) (added i64 77)])")) 0))
+          "(module schema-soak) (defstruct State [(added i64 88) (value i64 7)])"
+          "(module schema-soak) (defstruct State [(value i64 7) (added i64 77)])")) 0))
         (assert (= (graph/root heap 1) root))
         (assert (= (.version (.schema root)) (+ i 2)))
         (assert (= (al/al-len (.schemas heap)) 1))
@@ -38,7 +38,7 @@
           (assert (= (session/submit! "(module schema-soak) (let [fresh (State)] (.added fresh))") 0))
           (assert (= (.result (session/instance)) (if even "88" "77")))
           ; A rejected proposal must retain the current root, defaults and graph.
-          (assert (!= (session/submit! "(module schema-soak) (defstruct State :live/state true [(value bool false)])") 0))
+          (assert (!= (session/submit! "(module schema-soak) (defstruct State [(value bool false)])") 0))
           (assert (= (.version (.schema root)) (+ i 2))) 0)))
     (assert (= (session/submit! "(module schema-soak) (value)") 0))
     (assert (= (.result (session/instance)) "42")))

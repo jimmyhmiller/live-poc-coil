@@ -38,9 +38,11 @@
     (assert (= (.version (.schema identity)) 2))
     (assert (= (atomic/atomic-load (field (managed/state) condition)) 0))
     (assert (= (atomic/atomic-load (field (managed/state) epoch)) 2))
-    (assert (= (al/al-len (.schemas (field (managed/state) heap))) 1))
+    ; The handwritten bridge fixture's two physical structs are ordinary
+    ; program structs too, so the session versions them alongside logical 77.
+    (assert (= (al/al-len (.schemas (field (managed/state) heap))) 3))
     (assert (= (al/al-len (.edges (field (managed/state) heap))) 0))
-    (assert (= (al/al-len (.owners (managed/state))) 1)))
+    (assert (= (al/al-len (.owners (managed/state))) 3)))
   (assert (= (session/submit! "(module managed-demo) (read-value)") 0))
   (assert (= (.result (session/instance)) "9"))
   (assert (= (session/submit! "(module managed-demo) (added-value)") 0))

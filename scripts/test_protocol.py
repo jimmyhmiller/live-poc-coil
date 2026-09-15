@@ -46,6 +46,12 @@ effect = c.request('eval', id='effect-once', ns='live-demo', code=code)
 assert effect['value'] == '1', effect
 assert c.request('eval', id='effect-once', ns='live-demo', code=code) == effect
 assert other.request('eval', ns='live-demo', code='(load (counter))')['value'] == '1'
+# Default hosts must reject the test-only fault control, even over an
+# authenticated connection. The visible fault workload uses LPC_TESTING=1.
+denied = c.request('eval', ns='live-demo', code='(extern test-fault :as "lpc_test_payload_failure" :cc c [i64] (-> i64)) (test-fault 0)')
+assert denied['value'] == '-1', denied
+denied = c.request('eval', ns='live-demo', code='(extern test-validation-fault :as "lpc_test_validation_failure" :cc c [i64] (-> i64)) (test-validation-fault 0)')
+assert denied['value'] == '-1', denied
 c.close()
 other.close()
 print('PASS: auth, bytewise framing, shared revision, idempotency, conflicts and rejection')

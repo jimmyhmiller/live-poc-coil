@@ -1,9 +1,9 @@
 # Persistent state and field transitions
 
-Managed records opt in explicitly. Plain Coil records retain their ordinary behavior. Managed schemas own the lifetime of generated physical types; an authored `:jit/retain` option is rejected.
+Every ordinary `defstruct` in the live program is a versioned schema. No source annotation is required. The session owns the lifetime of generated physical types; an authored `:jit/retain` option is rejected because it conflicts with that ownership.
 
 ```coil
-(defstruct State :live/state true
+(defstruct State
   [(visible bool true)
    (value i64 7)])
 
@@ -22,7 +22,7 @@ A construction default does not authorize discarding an existing value. Supply a
 ```coil
 (defsum Visibility (Hidden) (Visible))
 
-(defstruct State :live/state true
+(defstruct State
   [(visible Visibility (Visible))
    (value i64 7)])
 
@@ -31,6 +31,8 @@ A construction default does not authorize discarding an existing value. Supply a
 ```
 
 The existing `false` becomes `Hidden`; newly constructed objects default to `Visible`. Transition parameters and results must match their field types. The pure preparation checker rejects mutation, raw pointers, global reads, unchecked calls and recursive helper cycles. Allocation, preparation and validation happen before graph publication. Failed preparation leaves accepted objects and code unchanged.
+
+Field renames use the same typed edge with an explicit source field: `(migrate State total :from value old old)`. This preserves `value` as `total`; the source name is explicit because removing one field and adding another is otherwise indistinguishable from deletion plus a defaulted addition. No struct annotation or schema opt-in is involved.
 
 Transition syntax is recorded with exact source and destination versions. Re-reading an unchanged transition does not authorize a later version edge. Equivalent type spellings are currently derived conservatively: a changed spelling can require an explicit transition even if it denotes an equivalent type.
 
@@ -54,4 +56,4 @@ Reset can accompany a schema change, but only replaces the named root's value. O
 
 ## Work still in progress
 
-Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Nested ownership policies, managed sums, generic schemas are not complete. Versioned compiler roots now retire obsolete schema metadata and native generations; the 1,000-edit durability gate passes. The moving Paper scenario has passed radius/default/retype/repair checks, including independent input domains; visible migration-failure injection remains outstanding. The complete contract remains in [PLAN.md](PLAN.md).
+Layout publication closes admission while readers drain. A pending transition then blocks only native roots whose checked call closure depends on that schema; unknown calls and raw evaluation remain conservative. If condition storage cannot be allocated, admission stays blocked until the complete pending source is repaired. Embedded record evolution is recursive: a changed child versions every containing record and typed child adapters preserve values and defaults transactionally. Resource-bearing containers, managed sums, and generic schemas are not complete. Versioned compiler roots now retire obsolete schema metadata and native generations; the 1,000-edit durability gate passes. The moving Paper scenario has passed radius/default/retype/repair checks, including independent input domains and forced allocation and validation failures in the visible host. The complete contract remains in [PLAN.md](PLAN.md).

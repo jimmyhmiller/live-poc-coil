@@ -17,7 +17,7 @@ The visible September 15 run exercised these edits through the socket in namespa
 
 Drawing resumes and the counter reads `1`. The added field still reads `2.0`. Native drawable presentation and screenshots were inspected during this run. Raw request/reply records are in [moving-schema-repair.json](measurements/moving-schema-repair.json).
 
-This check establishes visible schema migration and repair. It does not establish pixel equality against a fresh render or migration-failure injection in the visible host. Those remain separate acceptance work. The radius/schema edits were not a latency benchmark.
+This check establishes visible schema migration and repair. Pixel equality against a fresh render remains separate acceptance work. The radius/schema edits were not a latency benchmark.
 
 ## Schema retention
 
@@ -36,3 +36,11 @@ The visible check blocked `tick`, clicked the scene button, then clicked the ind
 Admission recognizes the audited, non-reentrant Paper host drawing/redraw entry points. Callback-taking run functions and unknown externs remain conservative. Checked scalar arithmetic uses the same classification as pure defaults; its operands still contribute dependencies. Regression coverage includes a counter update through a managed root, live arguments to host calls, and an unknown alias of a host symbol.
 
 `status` now includes `pending-input`, keyed by ticket, with domain, root, propagated code condition and whether the root has an opaque dependency. State admission conditions remain available separately.
+
+## Forced migration failure
+
+Start a fresh moving fixture with `LPC_TESTING=1`, then run `python3 scripts/test_paper_failure.py`. The host rejects fault-control calls without that explicit test setting. One fault selects a raw payload allocation; typed metadata allocations pass through. A second fault selects the validation of a fully prepared payload. Both disarm after firing.
+
+The visible run seeded counters 7 and 13 and briefly held velocity at zero while the event loop kept ticking. Adding `weight` first failed on the second shadow-payload allocation, then failed at the second prepared-payload validation. Accepted revision, schema epoch, payload address, layout size, position and both counters remained unchanged after each failure. A later submission succeeded, with weight 2.0 and the same preserved values. Restoring velocity resumed motion. [Raw request/reply records and executable hashes](measurements/paper-migration-failure.json).
+
+Native tests separately cover allocator selection/disarming and graph rollback after partial initialization, validation failure and cancellation. This is failure-path verification, not a latency benchmark.

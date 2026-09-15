@@ -4,11 +4,11 @@
 (import "live-poc-coil.input-routes" :as routes)
 (import "coil.primitive" :as p)
 (import "coil.slice" :as slice)
-(defstruct State :live/state true
+(defstruct State
   [(x f64 150.0) (velocity f64 70.0) (last f64 0.0)
    (visible bool true) (clicks i64 0)])
 (letonce world (State))
-(defstruct Controls :live/state true [(clicks i64 0)])
+(defstruct Controls [(clicks i64 0)])
 (letonce controls (Controls))
 (defn radius [] (-> f64) 24.0)
 (defn button-pigment [] (-> u32) 0xc77855)

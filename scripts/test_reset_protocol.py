@@ -7,7 +7,7 @@ try:
     ns = 'reset-protocol'
     initial = c.request('eval', ns=ns, code='''
 (import "live-poc-coil.meta")
-(defstruct State :live/state true [(value i64 7)])
+(defstruct State [(value i64 7)])
 (letonce world (State :value 42))
 (defn value [] (-> i64) (.value world))
 ''')

@@ -277,3 +277,35 @@
       (graph/retire! heap) (assert (= (.retired (audit)) 1)))
     (graph/destroy! heap)
     (assert (= (.retired (audit)) 2))))
+
+(defstruct ValidationState [(remaining i64) (calls i64)])
+(defn reject-validation [(context (ptr i8)) (schema (ptr graph/Schema)) (value (ptr i8))] (-> i64)
+  (let [state (p/cast (ptr ValidationState) context) status (graph/validate-schema context schema value)]
+    (set! (.calls state) (+ (.calls state) 1))
+    (if (!= status 0) status
+      (if (= (.remaining state) 0) -92
+        (do (when (> (.remaining state) 0) (set! (.remaining state) (- (.remaining state) 1))) 0)))))
+(deftest prepared-validation-failure-aborts-all-candidate-ownership
+  (store! (audit) (p/zeroed Audit))
+  (let [heap (p/alloc-stack graph/Heap) validation (p/alloc-stack ValidationState)
+        targets (slice/slice-new (p/cast (ptr (ptr graph/Schema)) 0) 0)]
+    (graph/init! heap (a/malloc-allocator))
+    (store! validation (ValidationState :remaining 1 :calls 0))
+    (set! (.prepared-validation heap)
+      (graph/Validation :context (p/cast (ptr i8) validation) :check (p/fnptr-of reject-validation)))
+    (let [schema (graph/register! heap (schema1)) first (graph/root! heap 1 schema) second (graph/root! heap 2 schema)
+          old-first (graph/payload (.memory first)) old-second (graph/payload (.memory second))]
+      (set! (.value (p/cast (ptr Node1) old-first)) 42)
+      (set! (.value (p/cast (ptr Node1) old-second)) 43)
+      (assert (= (graph/prepare! heap targets (p/cast (ptr i64) 0)) -92))
+      (assert (= (.calls validation) 2))
+      (assert (= (.aborted (audit)) 2)) (assert (= (.retired (audit)) 0))
+      (assert (= (graph/payload (.memory first)) old-first))
+      (assert (= (graph/payload (.memory second)) old-second))
+      (assert (= (.value (p/cast (ptr Node1) old-first)) 42))
+      (assert (= (.value (p/cast (ptr Node1) old-second)) 43))
+      (set! (.remaining validation) -1)
+      (assert (= (graph/prepare! heap targets (p/cast (ptr i64) 0)) 0))
+      (graph/publish! heap) (graph/retire! heap)
+      (assert (= (.retired (audit)) 2)))
+    (graph/destroy! heap) (assert (= (.retired (audit)) 4))))

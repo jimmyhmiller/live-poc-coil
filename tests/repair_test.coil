@@ -45,7 +45,8 @@
 
 (deftest blocked-aggregate-abi-and-batch-source-outcomes
   (assert (= (s/init!) 0))
-  (assert (= (s/submit-deferred! "(module demo) (import \"live-poc-coil.meta\") (defstruct Point [(x i64) (y i64)]) (defn point [] (-> Point) true) (defn read-point [] (-> i64) (let [value (point)] (.x value))) (defn ready [] (-> i64) 17)") 2))
+  (assert (= (s/submit! "(module demo) (import \"live-poc-coil.meta\") (defstruct Point [(x i64) (y i64)]) (defn point [] (-> Point) (Point :x 1 :y 2)) (defn read-point [] (-> i64) (let [value (point)] (.x value))) (defn ready [] (-> i64) 17)") 0))
+  (assert (= (s/submit-deferred! "(module demo) (defn point [] (-> Point) true)") 2))
   (assert (= (p/cast i64 (root 1)) 0))
   (assert (!= (p/cast i64 (root 2)) 0))
   (assert (= (value 2) 17)) (s/leave!)
@@ -53,7 +54,7 @@
         ready (al/al-get (.forms ledger) (source/find ledger "demo" "defn" "ready"))
         blocked (al/al-get (.forms ledger) (source/find ledger "demo" "defn" "point"))]
     (assert (= (.accepted ready) "(defn ready [] (-> i64) 17)"))
-    (assert (= (.accepted blocked) "")))
+    (assert (= (.accepted blocked) "(defn point [] (-> Point) (Point :x 1 :y 2))")))
   (assert (= (s/submit! "(module demo) (defn point [] (-> Point) (Point :x 42 :y 7))") 0))
   (assert (!= (p/cast i64 (root 1)) 0))
   (assert (= (value 1) 42)) (s/leave!)
@@ -103,7 +104,7 @@
   (assert (= (s/init!) 0))
   (assert (= (s/submit! "(module leaf-contract) (import \"live-poc-coil.meta\") (import \"live-poc-coil.paper-api\" :as paper)
     (extern unknown :as \"lpc_paper_redraw\" :cc c [] (-> i64))
-    (defstruct Controls :live/state true [(clicks i64 0)]) (letonce controls (Controls))
+    (defstruct Controls [(clicks i64 0)]) (letonce controls (Controls))
     (defn broken [] (-> i64) 1)
     (defn control [] (-> i64) (set! (.clicks controls) (+ (.clicks controls) 1)) (paper/redraw) 42)
     (defn argument [] (-> i64) (paper/number 0.0 0.0 12.0 0 (broken)))

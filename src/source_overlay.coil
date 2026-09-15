@@ -50,11 +50,7 @@
                       (set! module (reader/sexp-sym (reader/sexp-nth form 1))) 0))
                   (when (or (= (load kind) "letonce") (= (load kind) "migrate"))
                     (store! schema true) 0)
-                  (when (= (load kind) "defstruct")
-                    (for [j 2 (reader/sexp-count form)]
-                      (when (reader/sexp-kw? (reader/sexp-nth form j))
-                        (when (= (reader/sexp-kw (reader/sexp-nth form j)) "live/state")
-                          (store! schema true) 0)))) 0)))
+                  (when (= (load kind) "defstruct") (store! schema true) 0))))
             (al/al-push! items (Item :module (load module) :kind (load kind)
               :name (load name) :text bytes :persistent (load persistent))))) true))))
 (defn render [(allocator (dyn a/Allocator)) (items (slice Item))] (-> (slice u8))

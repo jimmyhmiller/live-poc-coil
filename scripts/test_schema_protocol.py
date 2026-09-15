@@ -7,13 +7,13 @@ ns = 'schema-protocol'
 initial = c.request('eval', ns=ns, id='schema-initial', code='''
 (import "live-poc-coil.meta")
 (defsum Visibility (Hidden) (Visible))
-(defstruct State :live/state true [(visible bool true) (value i64 7)])
+(defstruct State [(visible bool true) (value i64 7)])
 (letonce world (State :visible false :value 42))
 (defn value [] (-> i64) (.value world))
 ''')
 assert 'error' not in initial['status'], initial
 assert c.request('eval', ns=ns, code='(value)')['value'] == '42'
-missing_code = '(defstruct State :live/state true [(visible Visibility (Visible)) (value i64 7)])'
+missing_code = '(defstruct State [(visible Visibility (Visible)) (value i64 7)])'
 missing = c.request('eval', ns=ns, id='schema-missing', policy='deferred', code=missing_code)
 assert 'error' in missing['status'], missing
 assert int(c.request('status')['state-condition']) != 0

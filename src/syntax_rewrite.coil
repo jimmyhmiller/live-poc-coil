@@ -25,7 +25,7 @@
 (defn binder-name [(binder Code)] (-> Code)
   (cond (p/code-sym? binder) binder
         (and (head? binder `mut) (= (p/code-count binder) 2)) (p/code-nth binder 1)
-        :else (do (p/error "managed syntax requires an expanded core binding") binder)))
+        :else (do (p/error "schema rewrite requires an expanded core binding") binder)))
 (defn sequence [(forms Code) (start i64) (mapping Code) (bound Code)] (-> Code)
   (let [out (p/code-list-new)]
     (for [i 0 (p/code-count forms)]
@@ -55,7 +55,7 @@
       (let [arm (p/code-nth form i) next (p/code-list-new) (mut scope) bound]
         (unless (and (p/code-list? arm) (and (>= (p/code-count arm) 3)
           (p/code-vector? (p/code-nth arm 1))))
-          (p/error "managed syntax requires expanded match arms") 0)
+          (p/error "schema rewrite requires expanded match arms") 0)
         (p/code-list-push! next (rewrite (p/code-nth arm 0) mapping bound))
         (p/code-list-push! next (p/code-nth arm 1))
         (for [bi 0 (p/code-count (p/code-nth arm 1))]
@@ -68,7 +68,7 @@
   (let [out (p/code-list-new) (mut at) -1 (mut scope) bound]
     (for [i (if (head? form `fn*) 1 2) (p/code-count form)]
       (when (p/code-vector? (p/code-nth form i)) (set! at i) (break)))
-    (when (< (load at) 0) (p/error "managed function has no parameter vector") 0)
+    (when (< (load at) 0) (p/error "rewritten function has no parameter vector") 0)
     ; A generic parameter vector precedes the value parameter vector.
     (when (and (< (+ (load at) 1) (p/code-count form))
                (p/code-vector? (p/code-nth form (+ (load at) 1))))
@@ -87,7 +87,7 @@
                                     (p/code-eq (p/code-nth param 0) `:positional)))
                   at (if positional 1 0)]
               (unless (and (p/code-list? param) (= (p/code-count param) (+ at 2)))
-                (p/error "managed syntax requires expanded function parameters") 0)
+                (p/error "schema rewrite requires expanded function parameters") 0)
               (p/code-list-push! next (rebuild param
                 (if positional
                   `(:positional ~(p/code-nth param at) ~(rewrite (p/code-nth param (+ at 1)) mapping (load scope)))
@@ -116,10 +116,10 @@
 (defn constructor [(form Code) (record Code) (mapping Code) (bound Code)] (-> Code)
   (let [out (p/code-list-new) fields (p/code-nth record 2)]
     (unless (= (% (- (p/code-count form) 1) 2) 0)
-      (p/error "managed record constructors require field/value pairs") 0)
+      (p/error "record constructors require field/value pairs") 0)
     (for [i 0 (/ (- (p/code-count form) 1) 2)]
       (unless (p/code-keyword? (p/code-nth form (+ (* i 2) 1)))
-        (p/error "managed record constructors require named fields") 0))
+        (p/error "record constructors require named fields") 0))
     (p/code-list-push! out (p/code-nth record 1))
     (for [i 1 (p/code-count form)]
       (p/code-list-push! out (rewrite (p/code-nth form i) mapping bound)))

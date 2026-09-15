@@ -7,8 +7,10 @@
 ;;; A transition certificate binds authored syntax to an exact accepted source
 ;;; version and proposed destination version. Re-reading the declaration does
 ;;; not silently authorize it for another edge.
-;;; (field source-version destination-version old-type new-type binder body source)
-(defn declaration? [(form Code)] (-> bool) (syntax/head? form `migrate))
+;;; (destination source-version destination-version old-type new-type binder body source source-field)
+(defn declaration? [(form Code)] (-> bool)
+  (and (p/code-list? form) (and (> (p/code-count form) 0)
+    (= (p/code-str (p/code-nth form 0)) "migrate"))))
 (defn certificates [(record Code)] (-> Code)
   (if (> (p/code-count record) 7) (p/code-nth record 7) '()))
 (defn field-index [(fields Code) (name Code)] (-> i64)
@@ -28,33 +30,38 @@
         (if (and (p/code-eq (p/code-nth item 1) (p/code-nth prior 3))
                  (p/code-eq (p/code-nth item 2) (p/code-nth record 3))) item '())))))
 (defn propose! [(state (ptr Code)) (prior Code) (module Code) (form Code)] (-> i64)
-  (unless (and (>= (p/code-count form) 5)
-    (and (p/code-sym? (p/code-nth form 1))
-      (and (p/code-sym? (p/code-nth form 2)) (p/code-sym? (p/code-nth form 3)))))
-    (p/error "field transition requires (migrate Type field old expression ...)") 0)
-  (let [schemas (policy/schemas (load state)) name (p/code-nth form 1) field (p/code-nth form 2)
-        index (records/lookup schemas module name)
-        old-index (records/lookup (policy/schemas prior) module name)]
-    (when (or (< index 0) (< old-index 0))
-      (p/error "field transition requires an accepted managed schema") 0)
-    (let [record (p/code-nth schemas index) old (p/code-nth (policy/schemas prior) old-index)
-          items (certificates old) known (certificate-index items field)]
-      (block :done
-        (when (>= known 0)
-          (when (p/code-eq (p/code-nth (p/code-nth items known) 7) form) (break :done 0)))
-        (when (p/code-eq (p/code-nth record 3) (p/code-nth old 3))
-          (p/error "a new field transition requires a proposed schema change") 0)
-        (let [from (field-index (p/code-nth old 5) field)
-              to (field-index (p/code-nth record 5) field) body (p/code-list-new)]
-          (when (or (< from 0) (< to 0))
-            (p/error "field transition requires the field in both source and destination schemas") 0)
-          (for [i 4 (p/code-count form)] (p/code-list-push! body (p/code-nth form i)))
-          (let [certificate `(~field ~(p/code-nth old 3) ~(p/code-nth record 3)
-                  ~(p/code-nth (p/code-nth (p/code-nth old 5) from) 1)
-                  ~(p/code-nth (p/code-nth (p/code-nth record 5) to) 1)
-                  ~(p/code-nth form 3) (do ~@(p/code-list-done body)) ~form)
-                current (certificates record) at (certificate-index current field)
-                next (records/replace current (if (< at 0) (p/code-count current) at) certificate)]
-            (store! state (policy/with-state (load state)
-              (records/replace schemas index (records/replace record 7 next))
-              (policy/roots (load state)))))) 0))))
+  (let [renamed (and (>= (p/code-count form) 7) (p/code-eq (p/code-nth form 3) `:from))
+        source-at (if renamed 4 2) binder-at (if renamed 5 3) body-at (if renamed 6 4)]
+    (unless (and (>= (p/code-count form) (+ body-at 1))
+      (and (p/code-sym? (p/code-nth form 1))
+        (and (p/code-sym? (p/code-nth form 2))
+          (and (p/code-sym? (p/code-nth form source-at))
+               (p/code-sym? (p/code-nth form binder-at))))))
+      (p/error "field transition requires (migrate Type field old expression ...) or (migrate Type destination :from source old expression ...)") 0)
+    (let [current (load state) schemas (p/code-nth current 2) name (p/code-nth form 1)
+          field (p/code-nth form 2) source-field (p/code-nth form source-at)
+          index (records/lookup schemas module name)
+          old-index (records/lookup (p/code-nth prior 2) module name)]
+      (when (or (< index 0) (< old-index 0))
+        (p/error "field transition requires an accepted schema") 0)
+      (let [record (p/code-nth schemas index) old (p/code-nth (p/code-nth prior 2) old-index)
+            items (certificates old) known (certificate-index items field)]
+        (block :done
+          (when (>= known 0)
+            (when (p/code-eq (p/code-nth (p/code-nth items known) 7) form) (break :done 0)))
+          (when (p/code-eq (p/code-nth record 3) (p/code-nth old 3))
+            (p/error "a new field transition requires a proposed schema change") 0)
+          (let [from (field-index (p/code-nth old 5) source-field)
+                to (field-index (p/code-nth record 5) field) body (p/code-list-new)]
+            (when (or (< from 0) (< to 0))
+              (p/error "field transition requires its source field in the accepted schema and destination field in the proposed schema") 0)
+            (for [i body-at (p/code-count form)] (p/code-list-push! body (p/code-nth form i)))
+            (let [certificate `(~field ~(p/code-nth old 3) ~(p/code-nth record 3)
+                    ~(p/code-nth (p/code-nth (p/code-nth old 5) from) 1)
+                    ~(p/code-nth (p/code-nth (p/code-nth record 5) to) 1)
+                    ~(p/code-nth form binder-at) (do ~@(p/code-list-done body)) ~form ~source-field)
+                  current (certificates record) at (certificate-index current field)
+                  next (records/replace current (if (< at 0) (p/code-count current) at) certificate)]
+              (store! state (policy/with-state (load state)
+                (records/replace schemas index (records/replace record 7 next))
+                (policy/roots (load state)))))) 0)))))

@@ -1,0 +1,114 @@
+(module live-poc-coil.global-lower)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.policy-state" :as policy)
+(import "live-poc-coil.syntax-rewrite" :as syntax)
+
+;;; Record: (module kind authored-name physical-name version source).
+(defn global? [(form Code)] (-> bool)
+  (and (p/code-list? form) (and (= (p/code-count form) 3)
+    (and (or (p/code-eq (p/code-nth form 0) `def)
+             (p/code-eq (p/code-nth form 0) `const))
+         (p/code-sym? (p/code-nth form 1))))))
+(defn lookup [(records Code) (module Code) (name Code)] (-> i64)
+  (block :found
+    (for [i 0 (p/code-count records)]
+      (let [record (p/code-nth records i)]
+        (when (and (p/code-eq (p/code-nth record 0) module)
+          (p/bound-identifier=? (p/code-nth record 2) name)) (break :found i))))
+    -1))
+(defn physical-name [(authored Code) (version i64)] (-> Code)
+  (let [parsed (p/code-read (p/code-str authored "-live-global-v" version) '(reader-config))]
+    (unless (and (= (p/code-count parsed) 2) (p/code-sym? (p/code-nth parsed 1)))
+      (p/error "global version name cannot be represented as an identifier") 0)
+    (p/code-nth parsed 1)))
+(defn incoming-source [(module Code) (authored Code)] (-> Code)
+  (block :found
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (and (global? form) (p/bound-identifier=? (p/code-nth form 1) authored))
+          (break :found form))))
+    '()))
+(defn changed? [(module Code) (records Code) (module-name Code)] (-> bool)
+  (block :changed
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (global? form)
+          (let [at (lookup records module-name (p/code-nth form 1))]
+            (when (or (< at 0) (not (p/code-eq (p/code-nth (p/code-nth records at) 5) form)))
+              (break :changed true))))))
+    false))
+(defn next-records [(module Code) (records Code) (module-name Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    ; Treat module globals as one initialization graph. When one changes, every
+    ; retained initializer gets a new identity and is compiled against the same graph.
+    (for [i 0 (p/code-count records)]
+      (let [old (p/code-nth records i)]
+        (if (p/code-eq (p/code-nth old 0) module-name)
+          (let [incoming (incoming-source module (p/code-nth old 2))
+                source (if (> (p/code-count incoming) 0) incoming (p/code-nth old 5))
+                version (+ (p/code-int (p/code-nth old 4)) 1)]
+            (p/code-list-push! out `(~module-name ~(p/code-nth source 0) ~(p/code-nth old 2)
+              ~(physical-name (p/code-nth old 2) version) ~version ~source)))
+          (p/code-list-push! out old))))
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (and (global? form) (< (lookup records module-name (p/code-nth form 1)) 0))
+          (p/code-list-push! out `(~module-name ~(p/code-nth form 0) ~(p/code-nth form 1)
+            ~(physical-name (p/code-nth form 1) 1) 1 ~form)) 0)))
+    (p/code-list-done out)))
+(defn mapping [(next Code) (prior Code) (module Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 (p/code-count next)]
+      (let [record (p/code-nth next i)]
+        (when (p/code-eq (p/code-nth record 0) module)
+          (p/code-list-push! out `(~(p/code-nth record 2) ~(p/code-nth record 3)))
+          (let [old (lookup prior module (p/code-nth record 2))]
+            (when (>= old 0)
+              (p/code-list-push! out `(~(p/code-nth (p/code-nth prior old) 3)
+                ~(p/code-nth record 3))) 0)))))
+    (p/code-list-done out)))
+(defn physical [(record Code) (map Code)] (-> Code)
+  (let [source (p/code-nth record 5)]
+    (syntax/rebuild source `(~(p/code-nth record 1) ~(p/code-nth record 3)
+      ~(syntax/rewrite (p/code-nth source 2) map '())))))
+(defn incoming? [(module Code) (name Code)] (-> bool)
+  (> (p/code-count (incoming-source module name)) 0))
+(defn function? [(form Code)] (-> bool)
+  (and (p/code-list? form) (and (> (p/code-count form) 1)
+    (or (p/code-eq (p/code-nth form 0) `defn)
+        (p/code-eq (p/code-nth form 0) `defn*)))))
+(defn incoming-function? [(module Code) (name Code)] (-> bool)
+  (block :found
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (and (function? form) (p/bound-identifier=? (p/code-nth form 1) name))
+          (break :found true))))
+    false))
+(defn prepare [(module Code) (state (ptr Code)) (accepted Code)] (-> Code)
+  (let [module-name (p/code-nth module 0) prior (policy/globals accepted)]
+    (if (not (changed? module prior module-name)) module
+      (let [next (next-records module prior module-name)
+            map (mapping next prior module-name) out (p/code-list-new)]
+        (store! state (policy/with-globals (load state) next))
+        (for [i 0 (p/code-count module)]
+          (let [form (p/code-nth module i)]
+            (if (global? form)
+              (let [record (p/code-nth next (lookup next module-name (p/code-nth form 1)))]
+                (p/code-list-push! out (physical record map)))
+              (p/code-list-push! out (syntax/rewrite form map '())))))
+        (for [i 0 (p/code-count next)]
+          (let [record (p/code-nth next i)]
+            (when (and (p/code-eq (p/code-nth record 0) module-name)
+                       (not (incoming? module (p/code-nth record 2))))
+              (p/code-list-push! out (physical record map)) 0)))
+        (for [i 0 (p/code-count (policy/authored accepted))]
+          (let [record (p/code-nth (policy/authored accepted) i)]
+            (when (and (p/code-eq (p/code-nth record 0) module-name)
+                       (not (incoming-function? module (p/code-nth record 1))))
+              (p/code-list-push! out (syntax/rewrite (p/code-nth record 2) map '())) 0)))
+        (for [i 0 (p/code-count (policy/directs accepted))]
+          (let [record (p/code-nth (policy/directs accepted) i)]
+            (when (and (p/code-eq (p/code-nth record 0) module-name)
+                       (not (incoming-function? module (p/code-nth record 1))))
+              (p/code-list-push! out (syntax/rewrite (p/code-nth record 4) map '())) 0)))
+        (p/code-list-done out)))))

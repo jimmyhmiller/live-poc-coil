@@ -18,12 +18,12 @@
     (rt/free-one! input)))
 (deftest schema-publication-blocks-broken-dependent-and-repaired-input-runs-once
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module schema-repair) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State :live/state true [(visible bool true) (value i64 42)]) (letonce world (State)) (defn step [] (-> i64) (if (.visible world) (do (set! (.value world) (+ (.value world) 1)) 1) 0)) (defn read-value [] (-> i64) (.value world))") 0))
+  (assert (= (session/submit! "(module schema-repair) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State [(visible bool true) (value i64 42)]) (letonce world (State)) (defn step [] (-> i64) (if (.visible world) (do (set! (.value world) (+ (.value world) 1)) 1) 0)) (defn read-value [] (-> i64) (.value world))") 0))
   (let [root (graph/root (field (managed/state) heap) 1)
         runtime (field (session/instance) runtime) queue (field (session/instance) pending)
         counts (p/alloc-stack Counts)]
     (store! counts (p/zeroed Counts))
-    (assert (= (session/submit-deferred! "(module schema-repair) (defstruct State :live/state true [(visible Visibility (Visible)) (value i64 42)]) (migrate State visible old (if old (Visible) (Hidden)))") 2))
+    (assert (= (session/submit-deferred! "(module schema-repair) (defstruct State [(visible Visibility (Visible)) (value i64 42)]) (migrate State visible old (if old (Visible) (Hidden)))") 2))
     (assert (= (graph/root (field (managed/state) heap) 1) root))
     (assert (= (.version (.schema root)) 2))
     (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))

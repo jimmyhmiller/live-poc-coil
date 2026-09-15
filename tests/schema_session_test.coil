@@ -8,16 +8,16 @@
 (import "coil.alloc" :as a)
 (deftest authored-schema-edit-rechecks-root-users-and-preserves-state
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module schema-demo) (import \"live-poc-coil.meta\") (defstruct State :live/state true [(value i64 7)]) (letonce world (State :value 42)) (defn read-value [] (-> i64) (.value world))") 0))
+  (assert (= (session/submit! "(module schema-demo) (import \"live-poc-coil.meta\") (defstruct State [(value i64 7)]) (letonce world (State :value 42)) (defn read-value [] (-> i64) (.value world))") 0))
   (assert (= (session/submit! "(module schema-demo) (read-value)") 0))
   (assert (= (.result (session/instance)) "42"))
   (let [root (graph/root (field (managed/state) heap) 1)]
-    (assert (!= (session/submit! "(module schema-demo) (defstruct State :live/state true :jit/retain true [(value i64 99)])") 0))
+    (assert (!= (session/submit! "(module schema-demo) (defstruct State :jit/retain true [(value i64 99)])") 0))
     (assert (= (.version (.schema root)) 1))
     (assert (= (session/submit! "(module schema-demo) (letonce world (State :value 99))") 0))
     (assert (= (session/submit! "(module schema-demo) (read-value)") 0))
     (assert (= (.result (session/instance)) "42"))
-    (assert (= (session/submit! "(module schema-demo) (defstruct State :live/state true [(added i64 77) (value i64 7)])") 0))
+    (assert (= (session/submit! "(module schema-demo) (defstruct State [(added i64 77) (value i64 7)])") 0))
     (assert (= (graph/root (field (managed/state) heap) 1) root))
     (assert (= (.version (.schema root)) 2))
     (assert (= (session/submit! "(module schema-demo) (read-value)") 0))
@@ -31,7 +31,7 @@
 
 (deftest generated-defaults-keep-distinct-identities-and-explicit-constructor-values
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module defaults-demo) (import \"live-poc-coil.meta\") (defstruct State :live/state true [(first i64 11) (second i64 22)]) (letonce initial (State))") 0))
+  (assert (= (session/submit! "(module defaults-demo) (import \"live-poc-coil.meta\") (defstruct State [(first i64 11) (second i64 22)]) (letonce initial (State))") 0))
   (assert (= (session/submit! "(module defaults-demo) (+ (.first initial) (.second initial))") 0))
   (assert (= (.result (session/instance)) "33"))
   (assert (= (session/submit! "(module defaults-demo) (letonce explicit (State :first 100))") 0))
@@ -44,15 +44,15 @@
 
 (deftest typed-field-transition-preserves-old-values-and-rejects-missing-edges
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module transition-demo) (import \"live-poc-coil.meta\") (defstruct State :live/state true [(visible bool true) (value i64 7)]) (letonce world (State :visible false :value 42)) (defn value [] (-> i64) (.value world))") 0))
+  (assert (= (session/submit! "(module transition-demo) (import \"live-poc-coil.meta\") (defstruct State [(visible bool true) (value i64 7)]) (letonce world (State :visible false :value 42)) (defn value [] (-> i64) (.value world))") 0))
   (assert (= (session/submit! "(module transition-demo) (defsum Visibility (Hidden) (Visible))") 0))
   (let [root (graph/root (field (managed/state) heap) 1) version (.version (.schema root))]
     ; A new-construction default is not a migration of the existing false value.
-    (assert (!= (session/submit! "(module transition-demo) (defstruct State :live/state true [(visible Visibility (Visible)) (value i64 7)])") 0))
+    (assert (!= (session/submit! "(module transition-demo) (defstruct State [(visible Visibility (Visible)) (value i64 7)])") 0))
     (assert (= (.version (.schema root)) version))
     (assert (= (session/submit! "(module transition-demo) (value)") 0))
     (assert (= (.result (session/instance)) "42"))
-    (assert (= (session/submit! "(module transition-demo) (defstruct State :live/state true [(visible Visibility (Visible)) (value i64 7)]) (migrate State visible old (if old (Visible) (Hidden))) (defn is-hidden [] (-> bool) (match (.visible world) (Hidden [] true) (Visible [] false)))") 0))
+    (assert (= (session/submit! "(module transition-demo) (defstruct State [(visible Visibility (Visible)) (value i64 7)]) (migrate State visible old (if old (Visible) (Hidden))) (defn is-hidden [] (-> bool) (match (.visible world) (Hidden [] true) (Visible [] false)))") 0))
     (assert (= (graph/root (field (managed/state) heap) 1) root))
     (assert (= (.version (.schema root)) (+ version 1)))
     (assert (= (session/submit! "(module transition-demo) (is-hidden)") 0))
@@ -63,10 +63,10 @@
 
 (deftest missing-transition-repair-composes-with-desired-schema
   (assert (= (session/init!) 0))
-  (assert (= (session/submit! "(module deferred-schema) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State :live/state true [(visible bool true) (value i64 7)]) (letonce world (State :visible false :value 42)) (defn value [] (-> i64) (.value world))") 0))
+  (assert (= (session/submit! "(module deferred-schema) (import \"live-poc-coil.meta\") (defsum Visibility (Hidden) (Visible)) (defstruct State [(visible bool true) (value i64 7)]) (letonce world (State :visible false :value 42)) (defn value [] (-> i64) (.value world))") 0))
   (let [root (graph/root (field (managed/state) heap) 1)
         version (.version (.schema root))]
-    (assert (!= (session/submit-deferred! "(module deferred-schema) (defstruct State :live/state true [(visible Visibility (Visible)) (value i64 7)])") 0))
+    (assert (!= (session/submit-deferred! "(module deferred-schema) (defstruct State [(visible Visibility (Visible)) (value i64 7)])") 0))
     (assert (= (.version (.schema root)) version))
     (assert (!= (.desired-schema (session/instance)) ""))
     (assert (= (session/submit! "(module unrelated-schema) (import \"live-poc-coil.meta\") (defn ready [] (-> i64) 19)") 0))
@@ -97,7 +97,7 @@
 (deftest explicit-reset-is-atomic-and-not-replayed-by-declaration-rechecks
   (assert (= (session/init!) 0))
   (assert (= (session/submit! "(module reset-demo) (import \"live-poc-coil.meta\")
-    (defstruct State :live/state true [(value i64 7)]) (letonce world (State :value 42))
+    (defstruct State [(value i64 7)]) (letonce world (State :value 42))
     (defn value [] (-> i64) (.value world))") 0))
   (let [heap (field (managed/state) heap) root (graph/root (field (managed/state) heap) 1)]
     (assert (= (session/submit! "(module reset-demo) (reset-state! world (State :value 99))") 0))
@@ -111,7 +111,7 @@
     (assert (!= (session/submit! "(module reset-demo) (reset-state! missing (State))") 0))
     (assert (!= (session/submit! "(module reset-demo) (reset-state! world (State :value true))") 0))
     (assert (= (session/submit! "(module reset-demo) (letonce world (State :value 13))") 0))
-    (assert (= (session/submit! "(module reset-demo) (defstruct State :live/state true [(value i64 7) (added i64 8)])") 0))
+    (assert (= (session/submit! "(module reset-demo) (defstruct State [(value i64 7) (added i64 8)])") 0))
     (assert (= (session/submit! "(module reset-demo) (value)") 0))
     (assert (= (.result (session/instance)) "99"))
     (assert (= (session/submit! "(module reset-demo) (reset-state! world (State))") 0))
@@ -122,13 +122,13 @@
     ; Explicit reset can replace a retyped value, but cannot authorize dropping
     ; other objects that lack a transition for the same logical schema.
     (assert (!= (session/submit! "(module reset-demo)
-      (defstruct State :live/state true [(value bool true)])
+      (defstruct State [(value bool true)])
       (reset-state! world (State :value false))
       (defn value [] (-> i64) (if (.value world) 1 0))") 0))
     (assert (= (session/submit! "(module reset-demo) (value)") 0))
     (assert (= (.result (session/instance)) "7"))
     (assert (= (session/submit! "(module reset-demo)
-      (defstruct State :live/state true [(value bool true)])
+      (defstruct State [(value bool true)])
       (reset-state! world (State :value false)) (reset-state! other (State))
       (defn value [] (-> i64) (if (.value world) 1 0))") 0))
     (assert (= (session/submit! "(module reset-demo) (value)") 0))
@@ -136,4 +136,30 @@
     (assert (= (session/submit! "(module reset-demo) (.value other)") 0))
     (assert (= (.result (session/instance)) "true"))
     (assert (= (graph/root heap 1) root)))
+  (assert (= (session/close!) 0)))
+
+(deftest explicit-field-rename-preserves-the-source-value
+  (assert (= (session/init!) 0))
+  (assert (= (session/submit! "(module rename-demo) (import \"live-poc-coil.meta\") (defstruct State [(value i64 7)]) (letonce world (State :value 42)) (defn read-value [] (-> i64) (.value world))") 0))
+  (assert (= (session/submit! "(module rename-demo) (defstruct State [(total i64 0)]) (migrate State total :from value old old) (defn read-value [] (-> i64) (.total world))") 0))
+  (assert (= (session/submit! "(module rename-demo) (read-value)") 0))
+  (assert (= (.result (session/instance)) "42"))
+  (assert (= (session/close!) 0)))
+
+
+(deftest nested-record-schema-evolution-preserves-contained-values
+  (assert (= (session/init!) 0))
+  (assert (= (session/submit! "(module nested-demo) (import \"live-poc-coil.meta\") (defstruct Inner [(value i64 7)]) (defstruct Outer [(inner Inner (Inner :value 7))]) (defstruct Envelope [(outer Outer (Outer))]) (letonce world (Envelope :outer (Outer :inner (Inner :value 42)))) (defn read-value [] (-> i64) (.value (.inner (.outer world))))") 0))
+  (assert (= (session/submit! "(module nested-demo) (read-value)") 0))
+  (assert (= (.result (session/instance)) "42"))
+  (assert (= (session/submit! "(module nested-demo) (defstruct Inner [(value i64 7) (extra i64 9)])") 0))
+  (assert (= (session/submit! "(module nested-demo) (read-value)") 0))
+  (assert (= (.result (session/instance)) "42"))
+  (assert (= (session/submit! "(module nested-demo) (.extra (.inner (.outer world)))") 0))
+  (assert (= (.result (session/instance)) "9"))
+  (assert (!= (session/submit! "(module nested-demo) (defstruct Inner [(value bool true) (extra i64 9)])") 0))
+  (assert (= (session/submit! "(module nested-demo) (read-value)") 0))
+  (assert (= (.result (session/instance)) "42"))
+  (assert (= (session/submit! "(module nested-demo) (.extra (.inner (.outer world)))") 0))
+  (assert (= (.result (session/instance)) "9"))
   (assert (= (session/close!) 0)))

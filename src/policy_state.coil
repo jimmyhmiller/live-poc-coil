@@ -4,20 +4,32 @@
 ;;; One transactionally accepted syntax value, shared by the policy's passes.
 ;;; Sections hold function identities, current nominal schemas, and named roots.
 (defn current [] (-> Code)
-  (p/code-session-state '(live-policy-v1 () () () ())))
+  (p/code-session-state '(live-policy-v1 () () () () () () () ())))
 (defn functions [(state Code)] (-> Code) (p/code-nth state 1))
 (defn schemas [(state Code)] (-> Code) (p/code-nth state 2))
 (defn roots [(state Code)] (-> Code) (p/code-nth state 3))
+(defn generics [(state Code)] (-> Code) (p/code-nth state 5))
+(defn directs [(state Code)] (-> Code) (p/code-nth state 6))
+(defn sums [(state Code)] (-> Code) (p/code-nth state 7))
+(defn globals [(state Code)] (-> Code) (p/code-nth state 8))
 (defn with-functions [(state Code) (next Code)] (-> Code)
-  `(live-policy-v1 ~next ~(schemas state) ~(roots state) ~(authored state)))
+  `(live-policy-v1 ~next ~(schemas state) ~(roots state) ~(authored state) ~(generics state) ~(directs state) ~(sums state) ~(globals state)))
 (defn with-state [(state Code) (next-schemas Code) (next-roots Code)] (-> Code)
-  `(live-policy-v1 ~(functions state) ~next-schemas ~next-roots ~(authored state)))
+  `(live-policy-v1 ~(functions state) ~next-schemas ~next-roots ~(authored state) ~(generics state) ~(directs state) ~(sums state) ~(globals state)))
 ;;; Authored definitions are retained as syntax so a schema edit can recheck
 ;;; affected functions against the new physical types without reconstructing
 ;;; source text or rewriting already compiled implementations.
 (defn authored [(state Code)] (-> Code) (p/code-nth state 4))
 (defn with-authored [(state Code) (next Code)] (-> Code)
-  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~next))
+  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~next ~(generics state) ~(directs state) ~(sums state) ~(globals state)))
+(defn with-generics [(state Code) (next Code)] (-> Code)
+  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~(authored state) ~next ~(directs state) ~(sums state) ~(globals state)))
+(defn with-directs [(state Code) (next Code)] (-> Code)
+  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~(authored state) ~(generics state) ~next ~(sums state) ~(globals state)))
+(defn with-sums [(state Code) (next Code)] (-> Code)
+  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~(authored state) ~(generics state) ~(directs state) ~next ~(globals state)))
+(defn with-globals [(state Code) (next Code)] (-> Code)
+  `(live-policy-v1 ~(functions state) ~(schemas state) ~(roots state) ~(authored state) ~(generics state) ~(directs state) ~(sums state) ~next))
 (defn remember [(state Code) (module Code) (form Code)] (-> Code)
   (let [out (p/code-list-new) (mut found) false name (p/code-nth form 1)]
     (for [i 0 (p/code-count (authored state))]
@@ -32,7 +44,7 @@
 (defn envelope? [(form Code)] (-> bool)
   (if (not (syntax/envelope? form)) false
     (let [data (syntax/payload form)]
-      (and (p/code-list? data) (and (= (p/code-count data) 5)
+      (and (p/code-list? data) (and (= (p/code-count data) 9)
         (p/code-eq (p/code-nth data 0) `live-policy-v1))))))
 
 (defn source-text [(state Code) (module Code) (name Code)] (-> (slice u8))

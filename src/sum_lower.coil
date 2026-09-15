@@ -1,0 +1,127 @@
+(module live-poc-coil.sum-lower)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.policy-state" :as policy)
+(import "live-poc-coil.syntax-rewrite" :as syntax)
+
+;;; Record: (module authored-name physical-name version source variant-map).
+;;; Variant rows are (authored-name physical-name).
+(defn sum? [(form Code)] (-> bool)
+  (and (p/code-list? form) (and (>= (p/code-count form) 3)
+    (and (p/code-eq (p/code-nth form 0) `defsum) (p/code-sym? (p/code-nth form 1))))))
+(defn lookup [(records Code) (module Code) (name Code)] (-> i64)
+  (block :found
+    (for [i 0 (p/code-count records)]
+      (let [record (p/code-nth records i)]
+        (when (and (p/code-eq (p/code-nth record 0) module)
+          (p/bound-identifier=? (p/code-nth record 1) name)) (break :found i))))
+    -1))
+(defn variant-start [(form Code)] (-> i64)
+  (if (p/code-vector? (p/code-nth form 2)) 3 2))
+(defn name [(authored Code) (suffix (slice u8)) (version i64)] (-> Code)
+  (let [parsed (p/code-read (p/code-str authored suffix version) '(reader-config))]
+    (unless (and (= (p/code-count parsed) 2) (p/code-sym? (p/code-nth parsed 1)))
+      (p/error "sum version name cannot be represented as an identifier") 0)
+    (p/code-nth parsed 1)))
+(defn variants [(form Code) (version i64)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i (variant-start form) (p/code-count form)]
+      (let [variant (p/code-nth form i)]
+        (unless (and (p/code-list? variant) (and (> (p/code-count variant) 0)
+          (p/code-sym? (p/code-nth variant 0))))
+          (p/error "defsum requires named variant forms") 0)
+        (p/code-list-push! out `(~(p/code-nth variant 0)
+          ~(name (p/code-nth variant 0) "-live-variant-v" version)))))
+    (p/code-list-done out)))
+(defn replace [(records Code) (index i64) (record Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 (p/code-count records)]
+      (p/code-list-push! out (if (= i index) record (p/code-nth records i))))
+    (when (= index (p/code-count records)) (p/code-list-push! out record) 0)
+    (p/code-list-done out)))
+(defn propose! [(state (ptr Code)) (module Code) (form Code)] (-> i64)
+  (let [records (policy/sums (load state)) authored (p/code-nth form 1)
+        known (lookup records module authored) index (if (< known 0) (p/code-count records) known)]
+    (block :done
+      (when (and (>= known 0) (p/code-eq (p/code-nth (p/code-nth records known) 4) form))
+        (break :done -1))
+      (let [version (if (< known 0) 1 (+ (p/code-int (p/code-nth (p/code-nth records known) 3)) 1))]
+        (store! state (policy/with-sums (load state)
+          (replace records index `(~module ~authored ~(name authored "-live-sum-v" version)
+            ~version ~form ~(variants form version))))))
+      index)))
+(defn variant-lookup [(rows Code) (authored Code)] (-> i64)
+  (block :found
+    (for [i 0 (p/code-count rows)]
+      (when (p/bound-identifier=? (p/code-nth (p/code-nth rows i) 0) authored)
+        (break :found i)))
+    -1))
+(defn mapping [(state Code) (prior Code) (module Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 (p/code-count (policy/sums state))]
+      (let [record (p/code-nth (policy/sums state) i)]
+        (when (p/code-eq (p/code-nth record 0) module)
+          (p/code-list-push! out `(~(p/code-nth record 1) ~(p/code-nth record 2)))
+          (for [j 0 (p/code-count (p/code-nth record 5))]
+            (p/code-list-push! out (p/code-nth (p/code-nth record 5) j)))
+          (let [old (lookup (policy/sums prior) module (p/code-nth record 1))]
+            (when (>= old 0)
+              (let [old-record (p/code-nth (policy/sums prior) old)]
+                (p/code-list-push! out `(~(p/code-nth old-record 2) ~(p/code-nth record 2)))
+                (for [j 0 (p/code-count (p/code-nth old-record 5))]
+                  (let [old-variant (p/code-nth (p/code-nth old-record 5) j)
+                        next (variant-lookup (p/code-nth record 5) (p/code-nth old-variant 0))]
+                    (when (>= next 0)
+                      (p/code-list-push! out `(~(p/code-nth old-variant 1)
+                        ~(p/code-nth (p/code-nth (p/code-nth record 5) next) 1))) 0)))
+                0)
+              0)
+            0)
+          0)))
+    (p/code-list-done out)))
+(defn physical [(form Code) (record Code) (map Code)] (-> Code)
+  (let [out (p/code-list-new) start (variant-start form) rows (p/code-nth record 5)]
+    (p/code-list-push! out `defsum)
+    (p/code-list-push! out (p/code-nth record 2))
+    (for [i 2 start] (p/code-list-push! out (syntax/rewrite (p/code-nth form i) map '())))
+    (for [i start (p/code-count form)]
+      (let [variant (p/code-nth form i) next (p/code-list-new) row (p/code-nth rows (- i start))]
+        (p/code-list-push! next (p/code-nth row 1))
+        (for [j 1 (p/code-count variant)]
+          (p/code-list-push! next (syntax/rewrite (p/code-nth variant j) map '())))
+        (p/code-list-push! out (syntax/rebuild variant (p/code-list-done next)))))
+    (syntax/rebuild form (p/code-list-done out))))
+(defn definition? [(form Code)] (-> bool)
+  (and (p/code-list? form) (and (> (p/code-count form) 1)
+    (or (p/code-eq (p/code-nth form 0) `defn) (p/code-eq (p/code-nth form 0) `defn*)))))
+(defn incoming? [(module Code) (name Code)] (-> bool)
+  (block :found
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (and (definition? form) (p/bound-identifier=? (p/code-nth form 1) name))
+          (break :found true))))
+    false))
+(defn prepare [(module Code) (state (ptr Code)) (accepted Code)] (-> Code)
+  (let [module-name (p/code-nth module 0) out (p/code-list-new) (mut changed) false]
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (sum? form)
+          (when (>= (propose! state module-name form) 0) (set! changed true) 0) 0)))
+    (let [map (mapping (load state) accepted module-name)]
+      (for [i 0 (p/code-count module)]
+        (let [form (p/code-nth module i)]
+          (if (sum? form)
+            (let [record (p/code-nth (policy/sums (load state))
+                    (lookup (policy/sums (load state)) module-name (p/code-nth form 1)))]
+              (p/code-list-push! out (physical form record map)))
+            (p/code-list-push! out (syntax/rewrite form map '())))))
+      (when (load changed)
+        (for [i 0 (p/code-count (policy/authored accepted))]
+          (let [record (p/code-nth (policy/authored accepted) i)]
+            (when (and (p/code-eq (p/code-nth record 0) module-name)
+              (not (incoming? module (p/code-nth record 1))))
+              (p/code-list-push! out (syntax/rewrite (p/code-nth record 2) map '())) 0)))
+        (for [i 0 (p/code-count (policy/directs accepted))]
+          (let [record (p/code-nth (policy/directs accepted) i)]
+            (when (p/code-eq (p/code-nth record 0) module-name)
+              (p/code-list-push! out (syntax/rewrite (p/code-nth record 4) map '())) 0))))
+      (p/code-list-done out))))

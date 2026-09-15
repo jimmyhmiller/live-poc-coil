@@ -1,0 +1,23 @@
+(module live-poc-coil.fault-allocator)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+;;; A serialized allocator decorator. Typed metadata allocations pass through;
+;;; the configured raw-byte allocation fails once, then the decorator disarms.
+;;; Graph payloads use bytes-request (type-id zero), so tests can target payload
+;;; preparation independently of metadata container capacities.
+(defstruct FaultAllocator [(parent (dyn a/Allocator)) (remaining i64) (hits i64)])
+(defn init! [(state (ptr FaultAllocator)) (parent (dyn a/Allocator))] (-> i64)
+  (store! state (FaultAllocator :parent parent :remaining -1 :hits 0)) 0)
+(impl a/Allocator FaultAllocator
+  (allocate [(self (ptr FaultAllocator)) (request (ref a/AllocRequest))] (-> (Option (ptr i8)))
+    (block :result
+      (when (and (= (.type-id request) 0) (>= (.remaining self) 0))
+        (when (= (.remaining self) 0)
+          (set! (.remaining self) -1) (set! (.hits self) (+ (.hits self) 1))
+          (break :result (None)))
+        (set! (.remaining self) (- (.remaining self) 1)))
+      (a/raw-alloc (.parent self) (load request))))
+  (resize [(self (ptr FaultAllocator)) (memory (ptr i8)) (old (ref a/AllocRequest)) (next (ref a/AllocRequest))] (-> bool) false)
+  (remap [(self (ptr FaultAllocator)) (memory (ptr i8)) (old (ref a/AllocRequest)) (next (ref a/AllocRequest))] (-> (Option (ptr i8))) (None))
+  (deallocate [(self (ptr FaultAllocator)) (memory (ptr i8)) (request (ref a/AllocRequest))] (-> i64)
+    (a/raw-free (.parent self) memory (load request))))
