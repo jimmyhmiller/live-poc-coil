@@ -4,7 +4,7 @@ A native live-programming session with a real Paper window. Concrete function bo
 
 ## Build and run
 
-Requires macOS, the Paper integration worktree at `../paper-test/.worktrees/live-poc`, and Coil with commits `6485d21` and `3273588` from branch `live-poc-jit-project`. The compiler is installed globally on the development machine. `Coil.toml` declares the Paper dependency and native frameworks.
+Requires macOS, the Paper integration worktree at `../paper-test/.worktrees/live-poc`, and Coil at `f694a6e` from branch `live-poc-jit-project`. The compiler is installed globally on the development machine. `Coil.toml` declares the Paper dependency and native frameworks.
 
 ```sh
 coil build src/main.coil -o build/live-poc
@@ -39,6 +39,8 @@ PY
 
 Bencoded string-keyed requests support `clone`, `describe`, `eval`, `load-file`, `source`, `status`, `metrics`, and `shutdown`. This is a documented nREPL subset. `eval` accepts concrete function definitions and expressions with typed `Debug` results. `load-file` reads the `file` field. Requests may include a `base-revision`; stale bases conflict. A duplicate mutation ID with identical input returns the original result; changing its input conflicts. Receipts are retained up to a declared limit of 4,096.
 
+`eval` and `load-file` accept `policy: "deferred"` to publish typed blocked entries; strict rejection is the default. See [repair and callback contracts](docs/REPAIR.md). In Emacs, set buffer-local `coil-live-publication-policy` to `"deferred"`.
+
 `source` with `ns` and `symbol` returns desired and accepted function source, the latest diagnostic, source span, attempt and accepted revision. Compilation failures preserve the accepted native view. Expression effects occur after publication and execute once per request ID. Formatted results are limited to 65,536 bytes; overflow reports that execution occurred.
 
 ## Verification
@@ -54,10 +56,12 @@ python3 scripts/benchmark.py --count 1000 --warmup 20 \
   --output build/paper-1000.json  # visible running Paper host
 ```
 
-The September 15 color run presented all 1,000 measured edits below 100 ms: median 42.2 ms, p99 50.0 ms, maximum 77.1 ms. This measured client submission through the exact drawable's presentation timestamp, including clock uncertainty in threshold checks. Raw data is in `build/deferred-paper-1000.json`. The run predates source-ledger and expression integration; repeat it for the final build. Visible color and persistent click state were checked separately. Fresh-render pixel comparison remains outstanding.
+The latest 1,000-edit color run passed with median 45.2 ms, p99 53.3 ms and maximum 71.8 ms; zero misses including clock uncertainty. Every frame reported the app active and window visible. The measured Paper render was 1280 × 960 at scale 2 with a 16.67 ms frame duration. [Raw measurements and limits](docs/measurements/README.md) include Python and actual unsaved Emacs runs.
+
+Visible repair verification kept the prior scene while the color function was broken, queued a click, and applied it exactly once after a one-form repair. The native suite has 26 passing tests, both protocol scripts pass, and three Emacs integration tests pass.
 
 ## Remaining scope
 
-This implementation is in progress. Semantic blocked-entry repair, persistent-state schema migration, output streaming, cancellation, watcher integration, automated pixel comparison and broader retention/failure gates remain. Live generic and attributed function definitions receive capability diagnostics; use `defn*` for static helpers. Arbitrary native-stack continuation repair is outside the design.
+This implementation is in progress. Persistent-state schema migration, output streaming, compile/evaluation cancellation, watcher integration, automated pixel comparison and broader retention/failure gates remain. Direct semantic repair and input cancellation work; unanalysed calls use conservative admission, and expressions are rejected while any function is blocked. Live generic and attributed function definitions receive capability diagnostics; use `defn*` for static helpers. Arbitrary native-stack continuation repair is outside the design.
 
 See [the complete plan](docs/PLAN.md) and project notebook `live-poc-coil` for contracts, measurements and external bugs.

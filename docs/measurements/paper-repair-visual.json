@@ -1,0 +1,84 @@
+{
+  "before": {
+    "id": "client-15bdc46d7e5c4ac983e9066227fc2598-1",
+    "session": "application",
+    "revision": "1",
+    "now": "3036266.213516001",
+    "queued-input": "0",
+    "completed-input": "33",
+    "cancelled-input": "0",
+    "rejected-input": "0",
+    "status": [
+      "done"
+    ]
+  },
+  "block": {
+    "id": "client-15bdc46d7e5c4ac983e9066227fc2598-2",
+    "session": "application",
+    "revision": "2",
+    "diagnostic": "error: function 'live-demo.button-pigment': body has type bool but the declared return type is u32\n  --> <jit>:2:34\n  |\n2 | (defn button-pigment [] (-> u32) true)\n  |                                  ^^^^\n",
+    "status": [
+      "blocked",
+      "done"
+    ]
+  },
+  "blocked_status": {
+    "id": "client-15bdc46d7e5c4ac983e9066227fc2598-3",
+    "session": "application",
+    "revision": "2",
+    "now": "3036266.323592834",
+    "queued-input": "0",
+    "completed-input": "33",
+    "cancelled-input": "0",
+    "rejected-input": "0",
+    "status": [
+      "done"
+    ]
+  },
+  "after_click": {
+    "id": "client-de16c3f5d35644e5b319ffeca4bf6a9f-1",
+    "session": "application",
+    "revision": "2",
+    "now": "3036281.337055834",
+    "queued-input": "17",
+    "completed-input": "33",
+    "cancelled-input": "0",
+    "rejected-input": "0",
+    "first-input-ticket": "34",
+    "status": [
+      "done"
+    ]
+  },
+  "repair": {
+    "id": "client-de16c3f5d35644e5b319ffeca4bf6a9f-2",
+    "session": "application",
+    "revision": "3",
+    "ns": "live-demo",
+    "status": [
+      "done"
+    ]
+  },
+  "after_repair": {
+    "id": "client-de16c3f5d35644e5b319ffeca4bf6a9f-3",
+    "session": "application",
+    "revision": "3",
+    "now": "3036281.423194501",
+    "queued-input": "0",
+    "completed-input": "50",
+    "cancelled-input": "0",
+    "rejected-input": "0",
+    "status": [
+      "done"
+    ]
+  },
+  "clicks": {
+    "id": "client-de16c3f5d35644e5b319ffeca4bf6a9f-4",
+    "session": "application",
+    "revision": "4",
+    "ns": "live-demo",
+    "value": "1",
+    "status": [
+      "done"
+    ]
+  }
+}

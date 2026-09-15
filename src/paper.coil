@@ -9,28 +9,52 @@
 (import "paper.objc" :use *)
 (import "paper.ffi" :use *)
 (import "live-poc-coil.session" :as session)
+(import "live-poc-coil.runtime" :as runtime)
+(import "live-poc-coil.pending" :as pending)
+(import "coil.alloc" :as alloc)
 (import "live-poc-coil.metrics" :as metrics)
 (import "live-poc-coil.presentation" :as presentation)
 (import "live-poc-coil.protocol" :as protocol)
 (extern pthread_main_np :cc c [] (-> i32))
 (defstruct AppState [(served i64) (drawing i64) (running bool) (observer (ptr presentation/Observer))
-  (draw (fnptr c [] i64)) (event (fnptr c [i64 i64 f64 f64] i64))])
+  (draw-root i64) (event-root i64) (draw (fnptr c [] i64)) (event (fnptr c [i64 i64 f64 f64] i64))])
 (defn app-state [] (-> (ptr AppState)) (p/alloc-static AppState))
+(defn enter-draw [] (-> bool)
+  (assert (= (pthread_main_np) 1))
+  (if (not (.running (app-state))) false
+    (let [view (runtime/enter-root! (field (session/instance) runtime) (.draw-root (app-state)))]
+      (if (= (p/cast i64 view) 0) false
+        (do (set! (.drawing (app-state)) (.revision view))
+            (metrics/draw! (.revision view)) true)))))
+(defn leave-draw [] (-> i64) (session/leave!))
 (defn draw-trampoline [] (-> i64)
   (assert (= (pthread_main_np) 1))
-  (if (not (.running (app-state))) 0
-  (let [revision (session/begin-native)]
-    (assert (>= revision 0))
-    (set! (.drawing (app-state)) revision)
-    (p/call-ptr (.draw (app-state)))
-    (session/leave!))))
+  (p/call-ptr (.draw (app-state))))
+(defstruct Input [(kind i64) (id i64) (x f64) (y f64)])
+(defn execute-input [(raw (ptr i8))] (-> i64)
+  (assert (= (pthread_main_np) 1))
+  (let [input (p/cast (ptr Input) raw)]
+    (p/call-ptr (.event (app-state)) (.kind input) (.id input) (.x input) (.y input))))
+(defn drop-input [(raw (ptr i8))] (-> i64)
+  (runtime/free-one! (p/cast (ptr Input) raw)))
+(defn pump-input [] (-> i64)
+  (assert (= (pthread_main_np) 1))
+  (unless (runtime/pinned? (field (session/instance) runtime))
+  (for [i 0 64]
+    (when (<= (pending/pump-one! (field (session/instance) pending)
+                                (field (session/instance) runtime)) 0) (break))))
+  0)
 (defn event-trampoline [(kind i64) (id i64) (x f64) (y f64)] (-> i64)
   (assert (= (pthread_main_np) 1))
   (if (not (.running (app-state))) 0
-  (let [view (session/enter!)]
-    (assert (!= (p/cast i64 view) 0))
-    (let [result (p/call-ptr (.event (app-state)) kind id x y)]
-      (session/leave!) result))))
+    (let [input (alloc/box! (alloc/malloc-allocator) Input (Input :kind kind :id id :x x :y y))
+          ticket (pending/enqueue! (field (session/instance) pending) (.event-root (app-state))
+            (p/cast (ptr i8) input) (p/fnptr-of execute-input) (p/fnptr-of drop-input))]
+      (if (> ticket 0) (pump-input)
+        (do (drop-input (p/cast (ptr i8) input))
+            (msg i64 (.window (host/host)) (sel c"setTitle:") [(ptr i8)]
+              (ns c"Live Coil — input queue full"))
+            ticket)))))
 (defstruct FrameSlot [(sample (ptr presentation/Sample)) (command (ptr i8)) (drawable (ptr i8))])
 (defstruct FramePool [(slots (array FrameSlot 64))])
 (defn frames [] (-> (ptr FramePool)) (p/alloc-static FramePool))
@@ -79,6 +103,7 @@
 (defn before-frame [] (-> bool)
   (assert (= (pthread_main_np) 1))
   (collect-frames)
+  (pump-input)
   (when (protocol/stopping)
     (msg i64 (.window (host/host)) (sel c"close") []))
   (let [revision (session/current-revision)]
@@ -86,17 +111,22 @@
       (set! (.served (app-state)) revision)
       (host/paper_redraw)))
   true)
-(defn run! [(draw-callback (fnptr c [] i64)) (event-callback (fnptr c [i64 i64 f64 f64] i64))] (-> i64)
+(defn run! [(draw-root i64) (draw-callback (fnptr c [] i64)) (event-root i64) (event-callback (fnptr c [i64 i64 f64 f64] i64))] (-> i64)
   (assert (= (pthread_main_np) 1))
   (set! (.running (app-state)) true)
   (set! (.observer (app-state)) (presentation/observer-new))
+  (set! (.draw-root (app-state)) draw-root)
+  (set! (.event-root (app-state)) event-root)
   (set! (.draw (app-state)) draw-callback)
   (set! (.event (app-state)) event-callback)
   (host/paper_configure c"Live Coil — Paper latency proof" 640.0 480.0)
   (host/paper_frame_integration (fnptr-of before-frame) (fnptr-of present-frame))
+  (host/paper_draw_admission (fnptr-of enter-draw) (fnptr-of leave-draw))
   (host/paper_run (fnptr-of draw-trampoline) (fnptr-of event-trampoline))
   (set! (.running (app-state)) false)
   (host/paper_clear_frame_integration)
+  (host/paper_clear_draw_admission)
+  (assert (= (pending/close! (field (session/instance) pending)) 0))
   ; Retire metrics access before session teardown. Copied native Blocks own
   ; their contexts until Metal disposes them, including skipped tail frames.
   ; They contain no JIT addresses and cannot access a retired metrics instance.

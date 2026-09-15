@@ -1,0 +1,11 @@
+{
+  "measured": 1000,
+  "presented": 1000,
+  "p50_ms": 38.39826583862305,
+  "p95_ms": 46.90265655517578,
+  "p99_ms": 50.40574073791504,
+  "max_ms": 63.079118728637695,
+  "clock_uncertainty_plus_end_drift_ms": 9.017586708068848,
+  "misses_including_uncertainty_and_drift": 0,
+  "background_or_unknown_samples": 0
+}

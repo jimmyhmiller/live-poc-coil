@@ -18,7 +18,5 @@
     (set! (.clicks (state)) (+ (.clicks (state)) 1))
     (paper/redraw))
   0)
-(defn* draw-entry [] (-> i64) (draw))
-(defn* event-entry [(kind i64) (id i64) (x f64) (y f64)] (-> i64) (event kind id x y))
-(defn* launch [] (-> i64) (paper/run (p/fnptr-of draw-entry) (p/fnptr-of event-entry)))
+(defn* launch [] (-> i64) (paper/run draw event))
 (export-c [launch :as "lpc_launch"])

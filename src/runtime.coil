@@ -17,9 +17,11 @@
 ;;; it only after every entry in every live view stops referring to this image.
 (defstruct Image [(token i64) (references i64)])
 
-(defstruct Entry [(address (ptr i8)) (image (ptr Image)) (condition i64)])
+(defstruct Entry [(address (ptr i8)) (image (ptr Image)) (condition i64) (direct i64) (opaque bool)])
 
-(defstruct View [(revision i64) (readers i64) (entries (al/ArrayList Entry))])
+(defstruct Dependency [(from i64) (to i64)])
+
+(defstruct View [(revision i64) (readers i64) (entries (al/ArrayList Entry)) (dependencies (al/ArrayList Dependency))])
 
 (defstruct Runtime
   [(mutex sync/Mutex)
@@ -48,7 +50,8 @@
           (View
             :revision revision
             :readers 0
-            :entries (al/al-new [Entry] (a/malloc-allocator)))))
+            :entries (al/al-new [Entry] (a/malloc-allocator))
+            :dependencies (al/al-new [Dependency] (a/malloc-allocator)))))
 
 (defn init! [(r (ptr Runtime))] (-> i64)
   (store! r (p/zeroed Runtime))
@@ -77,6 +80,8 @@
         (when (!= (p/cast i64 (.image e)) 0)
           (set! (.references (.image e)) (+ (.references (.image e)) 1)))
         (al/al-push! (field v entries) e)))
+    (for [i 0 (al/al-len (.dependencies old))]
+      (al/al-push! (field v dependencies) (al/al-get (.dependencies old) i)))
     (unlock! r)
     v))
 
@@ -84,6 +89,13 @@
   (if (or (< id 0) (> id 65535))
       -1
       (do
+        (let [(mut kept) 0]
+          (for [i 0 (al/al-len (.dependencies v))]
+            (let [edge (al/al-get (.dependencies v) i)]
+              (when (!= (.from edge) id)
+                (al/al-set! (field v dependencies) (load kept) edge)
+                (set! kept (+ (load kept) 1)) 0)))
+          (set! (.len (field v dependencies)) (load kept)))
         (loop (if (> (al/al-len (.entries v)) id)
                   (break)
                   (al/al-push! (field v entries) (p/zeroed Entry))))
@@ -94,8 +106,53 @@
                   (Entry
                     :address address
                     :image (p/cast (ptr Image) 0)
-                    :condition 0)))
+                    :condition 0 :direct 0 :opaque false)))
         0)))
+
+(defn dependency! [(v (ptr View)) (from i64) (to i64)] (-> i64)
+  (assert (and (>= from 0) (< from (al/al-len (.entries v)))))
+  (assert (and (>= to 0) (< to 65536)))
+  (block :added
+    (for [i 0 (al/al-len (.dependencies v))]
+      (let [edge (al/al-get (.dependencies v) i)]
+        (when (and (= (.from edge) from) (= (.to edge) to)) (break :added 0))))
+    (al/al-push! (field v dependencies) (Dependency :from from :to to))
+    0))
+
+;;; A failed body has no callable address in the new view. Readers of an old
+;;; view retain their own entry and image lease until their invocation ends.
+(defn block! [(v (ptr View)) (id i64) (condition i64)] (-> i64)
+  (assert (> condition 0))
+  (let [status (stage! v id (p/cast (ptr i8) 0))]
+    (when (= status 0)
+      (let [entry (al/al-elem [Entry] (field v entries) id)]
+        (set! (.direct entry) condition)
+        (set! (.condition entry) condition)))
+    status))
+(defn opaque! [(v (ptr View)) (id i64)] (-> i64)
+  (let [entry (al/al-elem [Entry] (field v entries) id)] (set! (.opaque entry) true))
+  0)
+(defn propagate! [(v (ptr View))] (-> i64)
+  (let [(mut first-blocked) 0]
+    (for [i 0 (al/al-len (.entries v))]
+      (let [entry (al/al-get (.entries v) i)]
+        (when (> (.direct entry) 0) (set! first-blocked (.direct entry)) (break))))
+    (for [i 0 (al/al-len (.entries v))]
+      (let [entry (al/al-elem [Entry] (field v entries) i)]
+        (set! (.condition entry)
+          (if (and (.opaque entry) (= (.direct entry) 0)) (load first-blocked) (.direct entry))))))
+  (let [(mut changed) true]
+    (loop
+      (unless (load changed) (break))
+      (set! changed false)
+      (for [i 0 (al/al-len (.dependencies v))]
+        (let [edge (al/al-get (.dependencies v) i)]
+          (assert (< (.to edge) (al/al-len (.entries v))))
+          (let [from (al/al-elem [Entry] (field v entries) (.from edge))
+                to (al/al-elem [Entry] (field v entries) (.to edge))]
+            (when (and (= (.condition from) 0) (!= (.condition to) 0))
+              (set! (.condition from) (.condition to)) (set! changed true) 0))))))
+  0)
 
 ;;; The staged code is still private. Reserve its exact generation ownership
 ;;; before making a pointer visible to any application invocation.
@@ -113,6 +170,7 @@
   0)
 
 (defn publish! [(r (ptr Runtime)) (v (ptr View))] (-> i64)
+  (propagate! v)
   ; Reserve registry storage before acquiring the publication lock.
   (al/al-reserve! (field r views) (+ (al/al-len (.views r)) 1))
   (lock! r)
@@ -132,6 +190,36 @@
     (unlock! r)
     (assert (= (pthread_setspecific (.key r) (p/cast (ptr i8) v)) 0))
     v))
+
+;;; Preflight and pin are one locked operation. Publication cannot slip between
+;;; checking a root's dependency closure and choosing its execution view.
+;;; A null result owns no view and must not be paired with leave!.
+(defn enter-root! [(r (ptr Runtime)) (id i64)] (-> (ptr View))
+  (assert (= (p/cast i64 (pthread_getspecific (.key r))) 0))
+  (lock! r)
+  (let [(mut admitted) (p/cast (ptr View) 0)]
+    (unless (.closed r)
+      (let [v (.current r)]
+        (when (and (>= id 0) (< id (al/al-len (.entries v))))
+          (let [entry (al/al-get (.entries v) id)]
+            (when (and (= (.condition entry) 0) (!= (p/cast i64 (.address entry)) 0))
+              (set! (.readers v) (+ (.readers v) 1))
+              (set! admitted v))))))
+    (unlock! r)
+    (assert (= (pthread_setspecific (.key r) (p/cast (ptr i8) (load admitted))) 0))
+    (load admitted)))
+
+(defn pinned? [(r (ptr Runtime))] (-> bool)
+  (!= (p/cast i64 (pthread_getspecific (.key r))) 0))
+(defn blocked? [(r (ptr Runtime))] (-> bool)
+  (lock! r)
+  (let [(mut blocked) false]
+    (unless (.closed r)
+      (for [i 0 (al/al-len (.entries (.current r)))]
+        (let [entry (al/al-get (.entries (.current r)) i)]
+          (when (!= (.condition entry) 0) (set! blocked true) (break)))))
+    (unlock! r)
+    (load blocked)))
 
 (defn leave! [(r (ptr Runtime))] (-> i64)
   (let [v (p/cast (ptr View) (pthread_getspecific (.key r)))]
@@ -158,6 +246,7 @@
       (when (!= (p/cast i64 (.image e)) 0)
         (assert (> (.references (.image e)) 0))
         (set! (.references (.image e)) (- (.references (.image e)) 1)))))
+  (al/al-free! (field v dependencies))
   (al/al-free! (field v entries))
   (free-one! v))
 

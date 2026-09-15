@@ -9,11 +9,12 @@
 (import "live-poc-coil.session" :as session)
 (import "live-poc-coil.metrics" :as metrics)
 (import "live-poc-coil.source" :as source)
+(import "live-poc-coil.pending" :as pending)
 
 (extern snprintf :cc c [(ptr i8) u64 (ptr i8) ...] (-> i32))
 (extern arc4random_buf :cc c [(ptr i8) u64] (-> void))
 (defstruct Receipt [(id (slice u8)) (code (slice u8)) (ns (slice u8))
-  (base (slice u8)) (op (slice u8)) (response (slice u8))])
+  (base (slice u8)) (op (slice u8)) (policy (slice u8)) (response (slice u8))])
 (defstruct Protocol [(token (slice u8)) (receipts (al/ArrayList Receipt)) (stop i64)])
 (defn state [] (-> (ptr Protocol)) (p/alloc-static Protocol))
 (defn stopping [] (-> i64) (atomic/atomic-load (field (state) stop)))
@@ -96,7 +97,7 @@
       (cond
         (= (.op request) "describe")
           (do
-            (b/response-string! (mut response) "value" "eval load-file clone describe metrics source status shutdown")
+            (b/response-string! (mut response) "value" "eval load-file clone describe metrics source status cancel-input shutdown")
             (b/response-status! (mut response) "done"))
         (= (.op request) "clone")
           (do (b/response-string! (mut response) "new-session" (.token (state)))
@@ -117,11 +118,27 @@
                 (number! (mut response) "revision" (.revision f))
                 (number! (mut response) "start" (.lo f))
                 (number! (mut response) "end" (.hi f))
+                (number! (mut response) "condition" (.condition f))
                 (b/response-status! (mut response) "done"))))
         (= (.op request) "status")
           (do (number! (mut response) "revision" (session/current-revision))
               (seconds! (mut response) "now" (metrics/now))
+              (let [queue (field (session/instance) pending)]
+                (pending/lock! queue)
+                (number! (mut response) "queued-input" (al/al-len (.items queue)))
+                (number! (mut response) "completed-input" (.completed queue))
+                (number! (mut response) "cancelled-input" (.cancelled queue))
+                (number! (mut response) "rejected-input" (.rejected queue))
+                (when (> (al/al-len (.items queue)) 0)
+                  (let [work (al/al-get (.items queue) 0)]
+                    (number! (mut response) "first-input-ticket" (.ticket work))))
+                (pending/unlock! queue))
               (b/response-status! (mut response) "done"))
+        (= (.op request) "cancel-input")
+          (let [ticket (integer (.ticket request))]
+            (if (and (> ticket 0) (= (pending/cancel! (field (session/instance) pending) ticket) 0))
+              (b/response-status! (mut response) "done")
+              (failure! (mut response) "input ticket is absent or already executing")))
         (= (.op request) "shutdown")
           (do (stop!) (b/response-status! (mut response) "done"))
         (or (= (.op request) "eval") (= (.op request) "load-file"))
@@ -133,7 +150,8 @@
               (let [old (al/al-get (.receipts (state)) i)]
                 (when (= (.id old) (.id request))
                   (if (and (= (.code old) source-text) (and (= (.ns old) ns)
-                      (and (= (.base old) (.base request)) (= (.op old) (.op request)))))
+                      (and (= (.base old) (.base request))
+                        (and (= (.policy old) (.policy request)) (= (.op old) (.op request))))))
                     (break :reply (copy-text allocator (.response old)))
                     (do (failure! (mut response) "request id reused with different input")
                         (break :reply (b/response-finish! (mut response))))))))
@@ -141,6 +159,8 @@
               (failure! (mut response) "session receipt capacity reached (4096); start a new session")
               (break :reply (b/response-finish! (mut response))))
             (cond
+              (not (or (= (.policy request) "") (or (= (.policy request) "strict") (= (.policy request) "deferred"))))
+                (failure! (mut response) "policy must be strict or deferred")
               (not (namespace? ns)) (failure! (mut response) "invalid namespace")
               (and (!= (.base request) "") (!= (integer (.base request)) (session/current-revision)))
                 (failure! (mut response) "base revision conflict")
@@ -150,7 +170,8 @@
                   (str/sb-push-str! (mut source) ns)
                   (str/sb-push-str! (mut source) ")\n")
                   (str/sb-push-str! (mut source) source-text)
-                  (if (= (session/submit! (str/sb-str (load source))) 0)
+                  (let [status (session/submit-mode! (str/sb-str (load source)) (= (.policy request) "deferred"))]
+                  (if (= status 0)
                     (do
                       (number! (mut response) "revision" (session/current-revision))
                       (b/response-string! (mut response) "ns" ns)
@@ -159,11 +180,15 @@
                       (if (.result-overflow (session/instance))
                         (failure! (mut response) "expression executed; formatted result exceeded 65536 bytes")
                         (b/response-status! (mut response) "done")))
-                    (failure! (mut response) (session/diagnostic)))))
+                    (if (= status 2)
+                      (do (number! (mut response) "revision" (session/current-revision))
+                          (b/response-string! (mut response) "diagnostic" (session/diagnostic))
+                          (b/response-status-pair! (mut response) "blocked" "done"))
+                      (failure! (mut response) (session/diagnostic)))))))
             (let [answer (b/response-finish! (mut response)) a (a/malloc-allocator)]
               (al/al-push! (field (state) receipts)
                 (Receipt :id (copy-text a (.id request)) :code (copy-text a source-text)
-                  :ns (copy-text a ns) :base (copy-text a (.base request)) :op (copy-text a (.op request))
+                  :ns (copy-text a ns) :policy (copy-text a (.policy request)) :base (copy-text a (.base request)) :op (copy-text a (.op request))
                   :response (copy-text a answer)))
               (break :reply answer)))
         true (failure! (mut response) "unsupported operation"))
@@ -173,6 +198,6 @@
     (for [i 0 (al/al-len (.receipts (state)))]
       (let [r (al/al-get (.receipts (state)) i)]
         (a/free a (.id r)) (a/free a (.code r)) (a/free a (.ns r))
-        (a/free a (.base r)) (a/free a (.op r)) (a/free a (.response r))))
+        (a/free a (.policy r)) (a/free a (.base r)) (a/free a (.op r)) (a/free a (.response r))))
     (al/al-free! (field (state) receipts))
     (a/free a (.token (state)))))

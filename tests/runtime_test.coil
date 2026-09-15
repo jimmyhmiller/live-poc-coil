@@ -1,0 +1,36 @@
+(module live-poc-coil.runtime-test)
+(import "coil.primitive" :as p)
+(import "coil.arraylist" :as al)
+(import "live-poc-coil.runtime" :as rt)
+(defn target [] (-> i64) 42)
+(deftest blocked-closure-preflight-and-revival
+  (let [runtime (p/alloc-stack rt/Runtime) address (p/cast (ptr i8) (p/fnptr-of target))]
+    (assert (= (rt/init! runtime) 0))
+    (let [v (rt/clone-current! runtime)]
+      (for [i 0 4] (assert (= (rt/stage! v i address) 0)))
+      (rt/dependency! v 0 1) (rt/dependency! v 1 2) (rt/dependency! v 2 1)
+      (rt/publish! runtime v))
+    (let [old (rt/enter-root! runtime 0)]
+      (assert (!= (p/cast i64 old) 0))
+      (let [candidate (rt/clone-current! runtime)]
+        (assert (= (rt/block! candidate 2 77) 0))
+        (rt/publish! runtime candidate))
+      (assert (= (p/call-ptr (p/cast (fnptr c [] i64) (rt/resolve runtime 0))) 42))
+      (rt/leave! runtime))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 1)) 0))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 2)) 0))
+    (assert (= (p/cast i64 (rt/enter-root! runtime -1)) 0))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 4)) 0))
+    (assert (!= (p/cast i64 (rt/enter-root! runtime 3)) 0))
+    (rt/leave! runtime)
+    (let [candidate (rt/clone-current! runtime)]
+      (rt/stage! candidate 2 address)
+      (rt/dependency! candidate 2 1)
+      (rt/publish! runtime candidate))
+    (assert (!= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+    (rt/leave! runtime)
+    (assert (rt/close! runtime))
+    (assert (= (p/cast i64 (rt/enter-root! runtime 0)) 0))
+    (rt/collect-views! runtime)
+    (rt/destroy! runtime)))

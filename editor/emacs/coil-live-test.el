@@ -35,3 +35,23 @@
     (coil-live-load-buffer)
     (coil-live-test--await (lambda () coil-live-last-revision))
     (should-not buffer-file-name)))
+
+(ert-deftest coil-live-deferred-unsaved-repair ()
+  (with-temp-buffer
+    (coil-mode)
+    (setq-local coil-live-publication-policy "deferred")
+    (insert "(module live-demo)\n(defn editor-repair [] (-> i64) true)\n")
+    (coil-live-connect)
+    (goto-char (point-max))
+    (coil-live-eval-defun)
+    (coil-live-test--await (lambda () coil-live-last-revision))
+    (should (buffer-modified-p))
+    (with-current-buffer "*coil-diagnostics*"
+      (should (string-match-p "body has type bool" (buffer-string))))
+    (let ((blocked coil-live-last-revision))
+      (goto-char (point-min))
+      (search-forward "true")
+      (replace-match "42")
+      (coil-live-eval-defun)
+      (coil-live-test--await (lambda () (not (equal blocked coil-live-last-revision)))))
+    (should-not buffer-file-name)))

@@ -1,0 +1,10 @@
+(module live-poc-coil.function)
+(import "coil.primitive" :as p)
+
+;;; A function value carries its stable identity and typed entry gate together.
+;;; Copying it preserves identity. Calling it requires a pinned execution view;
+;;; native callback adapters use id to preflight before entering the gate.
+(defstruct Function [T] [(gate T) (id i64)])
+(impl [Args... R] Callable (Function (fnptr c [Args...] R))
+  (call [(self (Function (fnptr c [Args...] R))) (args Args...) ...] (-> R)
+    (p/call-ptr (.gate self) args...)))

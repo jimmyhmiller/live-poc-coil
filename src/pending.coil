@@ -1,0 +1,97 @@
+(module live-poc-coil.pending)
+(import "coil.primitive" :as p)
+(import "coil.arraylist" :as al)
+(import "coil.alloc" :as a)
+(import "coil.sync" :as sync)
+(import "coil.result" :use *)
+(import "live-poc-coil.runtime" :as rt)
+
+;;; The queue owns each accepted payload and drops it once after execution or
+;;; cancellation. Callbacks are stable host code. A single pump executes work;
+;;; producers and cancellation may run concurrently. Admission checks the FIFO
+;;; head and pins its view before removing it, so new work cannot overtake it.
+(defstruct Work [(ticket i64) (root i64) (payload (ptr i8))
+  (run (fnptr c [(ptr i8)] i64)) (drop (fnptr c [(ptr i8)] i64))])
+(defstruct Queue [(mutex sync/Mutex) (items (al/ArrayList Work)) (limit i64)
+  (next i64) (running i64) (completed i64) (cancelled i64) (rejected i64) (closed bool)])
+(defn lock! [(q (ptr Queue))] (-> i64)
+  (match (sync/mutex-lock! (field q mutex)) (Ok [n] n) (Err [_] (a/oom-at c"pending lock" 0))))
+(defn unlock! [(q (ptr Queue))] (-> i64)
+  (match (sync/mutex-unlock! (field q mutex)) (Ok [n] n) (Err [_] (a/oom-at c"pending unlock" 0))))
+(defn init! [(q (ptr Queue)) (limit i64)] (-> i64)
+  (assert (> limit 0))
+  (store! q (p/zeroed Queue))
+  (match (sync/mutex-init (field q mutex)) (Ok [_] 0) (Err [_] (a/oom-at c"pending init" 0)))
+  (set! (.items q) (al/al-new [Work] (a/malloc-allocator)))
+  (al/al-reserve! (field q items) limit)
+  (set! (.limit q) limit) (set! (.next q) 1)
+  0)
+;;; A negative result leaves ownership with the caller.
+(defn enqueue! [(q (ptr Queue)) (root i64) (payload (ptr i8))
+  (run (fnptr c [(ptr i8)] i64)) (drop (fnptr c [(ptr i8)] i64))] (-> i64)
+  (lock! q)
+  (let [ticket (if (.closed q) -1
+      (if (>= (al/al-len (.items q)) (.limit q)) -2 (.next q)))]
+    (if (> ticket 0)
+      (do (al/al-push! (field q items) (Work :ticket ticket :root root :payload payload :run run :drop drop))
+          (set! (.next q) (+ ticket 1)) 0)
+      (do (set! (.rejected q) (+ (.rejected q) 1)) 0))
+    (unlock! q)
+    ticket))
+(defn remove! [(q (ptr Queue)) (index i64)] (-> i64)
+  (for [i index (- (al/al-len (.items q)) 1)]
+    (al/al-set! (field q items) i (al/al-get (.items q) (+ i 1))))
+  (set! (.len (field q items)) (- (al/al-len (.items q)) 1))
+  0)
+;;; Returns one ticket, 0 for empty/blocked, -1 if closed or another pump is active.
+(defn pump-one! [(q (ptr Queue)) (runtime (ptr rt/Runtime))] (-> i64)
+  (lock! q)
+  (block :result
+    (when (or (.closed q) (> (.running q) 0)) (unlock! q) (break :result -1))
+    (when (= (al/al-len (.items q)) 0) (unlock! q) (break :result 0))
+    (let [work (al/al-get (.items q) 0) view (rt/enter-root! runtime (.root work))]
+      (when (= (p/cast i64 view) 0) (unlock! q) (break :result 0))
+      (remove! q 0)
+      (set! (.running q) (.ticket work))
+      (unlock! q)
+      (p/call-ptr (.run work) (.payload work))
+      (rt/leave! runtime)
+      (p/call-ptr (.drop work) (.payload work))
+      (lock! q)
+      (set! (.running q) 0)
+      (set! (.completed q) (+ (.completed q) 1))
+      (unlock! q)
+      (.ticket work))))
+(defn cancel! [(q (ptr Queue)) (ticket i64)] (-> i64)
+  (lock! q)
+  (block :result
+    (when (= (.running q) ticket) (unlock! q) (break :result -2))
+    (for [i 0 (al/al-len (.items q))]
+      (let [work (al/al-get (.items q) i)]
+        (when (= (.ticket work) ticket)
+          (remove! q i)
+          (set! (.cancelled q) (+ (.cancelled q) 1))
+          (unlock! q)
+          (p/call-ptr (.drop work) (.payload work))
+          (break :result 0))))
+    (unlock! q)
+    -1))
+(defn close! [(q (ptr Queue))] (-> i64)
+  (lock! q)
+  (set! (.closed q) true)
+  (block :result
+    (when (> (.running q) 0) (unlock! q) (break :result -1))
+    (let [items (p/alloc-stack (al/ArrayList Work))]
+      (store! items (.items q))
+      (set! (.items q) (al/al-new [Work] (a/malloc-allocator)))
+      (set! (.cancelled q) (+ (.cancelled q) (al/al-len (load items))))
+      (unlock! q)
+      (for [i 0 (al/al-len (load items))]
+        (let [work (al/al-get (load items) i)] (p/call-ptr (.drop work) (.payload work))))
+      (al/al-free! items))
+    0))
+;;; Owner joins producers and the pump before destroying the queue.
+(defn destroy! [(q (ptr Queue))] (-> i64)
+  (assert (.closed q)) (assert (= (.running q) 0)) (assert (= (al/al-len (.items q)) 0))
+  (al/al-free! (field q items))
+  (match (sync/mutex-destroy! (field q mutex)) (Ok [n] n) (Err [_] -1)))

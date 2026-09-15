@@ -143,3 +143,29 @@
   (assert (!= (s/submit! "(module demo) (+ true 1)") 0))
   (assert (= (.result (s/instance)) ""))
   (assert (= (s/close!) 0)))
+
+(import "coil.arraylist" :as al)
+(defn dependency? [(view (ptr rt/View)) (from i64) (to i64)] (-> bool)
+  (block :found
+    (for [i 0 (al/al-len (.dependencies view))]
+      (let [edge (al/al-get (.dependencies view) i)]
+        (when (and (= (.from edge) from) (= (.to edge) to))
+          (break :found true))))
+    false))
+(deftest semantic-dependencies-follow-bindings
+  (assert (= (s/init!) 0))
+  (assert (= (s/submit! "(module left) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 2)") 0))
+  (assert (= (s/submit! "(module right) (import \"live-poc-coil.meta\") (defn f [] (-> i64) 3) (defn g [] (-> i64) (+ (left.f) (f))) (defn local [] (-> i64) (let [local-value 8] local-value))") 0))
+  (let [v (s/enter!)]
+    (assert (dependency? v 2 0))
+    (assert (dependency? v 2 1))
+    (assert (not (dependency? v 3 1)))
+    (assert (= (value 2) 5))
+    (s/leave!))
+  (assert (= (s/submit! "(module right) (defn g [] (-> i64) (f))") 0))
+  (let [v (s/enter!)]
+    (assert (not (dependency? v 2 0)))
+    (assert (dependency? v 2 1))
+    (assert (= (value 2) 3))
+    (s/leave!))
+  (assert (= (s/close!) 0)))

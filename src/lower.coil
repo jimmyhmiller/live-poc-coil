@@ -1,10 +1,12 @@
 (module live-poc-coil.lower)
 (import "coil.primitive" :as p)
 (import "coil.jit.lifetime")
-(import "coil.var" :as var)
+(import "live-poc-coil.function" :as function)
 (import "live-poc-coil.eval" :as evaluation)
+(import "live-poc-coil.semantic" :as semantic)
 
 (defannotation :live/definition i64)
+(defannotation :live/publication bool)
 
 (extern lpc_stage :cc c [i64 (ptr i8)] (-> i64))
 
@@ -49,10 +51,26 @@
 (defn publish [] (-> Code)
   (p/error "live publication requires the session transaction entry"))
 
+(defn publish-blocked [(ids Code)] (-> Code)
+  (p/error "blocked publication requires the session transaction entry"))
 (defn marker? [(x Code)] (-> bool)
   (and (p/code-list? x)
-       (and (= (p/code-count x) 1)
-            (p/code-eq (p/code-nth x 0) `live-poc-coil.meta/publish))))
+    (or (and (= (p/code-count x) 1)
+          (p/code-eq (p/code-nth x 0) `live-poc-coil.meta/publish))
+        (and (= (p/code-count x) 2)
+          (p/code-eq (p/code-nth x 0) `live-poc-coil.meta/publish-blocked)))))
+(defn blocked-id? [(m Code) (id i64)] (-> bool)
+  (block :found
+    (for [i 1 (p/code-count m)]
+      (let [form (p/code-nth m i)]
+        (when (entry? form)
+          (let [marker (p/code-nth form 4)]
+            (when (= (p/code-count marker) 2)
+              (let [ids (p/code-nth marker 1)]
+                (for [j 0 (p/code-count ids)]
+                  (when (p/code-eq (p/code-nth ids j) `~id)
+                    (break :found true)))))))))
+    false))
 
 (defn entry? [(f Code)] (-> bool)
   (and (definition? f) (and (= (p/code-count f) 5) (marker? (p/code-nth f 4)))))
@@ -141,14 +159,15 @@
                     (when (p/code-eq ret `Code)
                       (p/error "use defn* for static metaprogram helpers")
                       0)
-                    (p/code-list-push! out
-                                       `(defn* ~implementation
-                                          :jit/retain
-                                          false
-                                          :live/definition ~id
-                                          ~params
-                                          ~retform
-                                          ~@(body f 4 (p/code-count f))))
+                    (if (blocked-id? m id)
+                      ; The checked prototype supplies the exact proposed ABI.
+                      ; The semantic pass erases its fnptr reference before native
+                      ; linking, so a blocked entry has no fake implementation.
+                      (p/code-list-push! out
+                        `(extern ~implementation :cc c [~@(parameter-types m params)] (-> ~ret)))
+                      (p/code-list-push! out
+                        `(defn* ~implementation :jit/retain false :live/definition ~id
+                           ~params ~retform ~@(body f 4 (p/code-count f)))))
                     (when (< known 0)
                       (p/code-list-push! out
                                          `(defn* ~gate
@@ -162,10 +181,8 @@
                       (unless static-gate
                       (p/code-list-push! out
                                          `(def ~name
-                                            (var/var-static (fnptr c
-                                                                   [~@types]
-                                                                   ~ret)
-                                                            (p/fnptr-of ~gate))))
+                                            (function/Function
+                                              :gate (p/fnptr-of ~gate) :id ~id)))
                         0)
                       (p/code-list-push! out
                                          `(defn* ~helper [(address (fnptr c
@@ -179,7 +196,9 @@
                     ; The retained typed helper makes the checker validate the full
                     ; function-pointer ABI against the original gate on replacement.
                     (p/code-list-push! updates
-                                       `(~helper (p/fnptr-of ~implementation)))
+                                       `(semantic/describe ~id ~(p/code-str name) ~name
+                                          (p/fnptr-of ~helper) (p/fnptr-of ~implementation)
+                                          ~(if (blocked-id? m id) (+ id 1) 0)))
                     0))
               true (do (p/code-list-push! out f) 0))))
     (for [i 1 (p/code-count m)]
@@ -187,6 +206,7 @@
         (when (entry? f)
           (p/code-list-push! out
                              `(~(p/code-nth f 0) ~(p/code-nth f 1)
+                                 :live/publication true
                                  ~(p/code-nth f 2)
                                  ~(p/code-nth f 3)
                                  (do ~@(p/code-list-done updates) 0)))
@@ -205,7 +225,6 @@
             (let [m (p/code-nth modules i)]
               (p/code-list-push! out
                                  (if (active? m) (lower m (mut registry) false) m))))
-          (p/code-session-stage! (load registry))
           `(do ~@(p/code-list-done out))))))
 
 

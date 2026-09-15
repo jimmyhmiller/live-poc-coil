@@ -47,6 +47,11 @@
               presented (string-to-number (nrepl-dict-get telemetry "presented")))
         (when (<= presented 0) (accept-process-output nil 0.001)))
       (when (<= presented 0) (error "Revision %s was not presented" revision))
+      (setf (alist-get 'telemetry record)
+            (mapcar (lambda (key) (cons (intern key) (nrepl-dict-get telemetry key)))
+                    '("app-active" "window-visible" "render-width" "render-height"
+                      "render-scale" "frame-duration" "received" "compile-start"
+                      "compile-end" "published" "draw-start" "presented")))
       (setf (alist-get 'presented record) presented
             (alist-get 'latency_ms record)
             (* 1000 (- presented (alist-get 'submit record) offset))
@@ -54,9 +59,9 @@
     (unless (and (buffer-modified-p) (not buffer-file-name))
       (error "Benchmark stopped using an unsaved buffer"))))
 
-(defun coil-live-benchmark (&optional count)
+(defun coil-live-benchmark (&optional count output)
   "Measure COUNT unsaved replacements. Preserve failures in the raw report."
-  (let ((count (or count 1000)) (warmup 20) records clock (outcome "incomplete"))
+  (let ((count (or count 1000)) (warmup 20) records clock end-clock (outcome "incomplete"))
     (unwind-protect
         (with-temp-buffer
           (coil-mode)
@@ -71,16 +76,20 @@
               (let ((record (list (cons 'index index) (cons 'warmup (< index warmup))
                                   (cons 'outcome "unpresented") (cons 'submit nil)
                                   (cons 'revision nil) (cons 'presented nil)
-                                  (cons 'latency_ms nil))))
+                                  (cons 'latency_ms nil) (cons 'telemetry nil))))
                 (push record records)
                 (coil-live-benchmark--edit connection record (cadr clock)))
               (when (zerop (% index 50)) (message "Emacs benchmark: %d" index))
-              (accept-process-output nil (/ (random 18) 1000.0))))
+              (accept-process-output nil (/ (random 18) 1000.0)))
+            (setq end-clock (coil-live-benchmark--clock connection)))
           (setq outcome "complete"))
-      (with-temp-file "build/emacs-paper.json"
+      (with-temp-file (or output "build/emacs-paper.json")
         (insert (json-encode
                  `((workload . "emacs-unsaved-definition") (outcome . ,outcome)
                    (count . ,count) (warmup . ,warmup)
                    (clock_uncertainty_seconds . ,(and clock (/ (car clock) 2)))
                    (clock_offset_seconds . ,(cadr clock))
+                   (end_clock_offset_seconds . ,(cadr end-clock))
+                   (end_clock_uncertainty_seconds . ,(and end-clock (/ (car end-clock) 2)))
+                   (clock_drift_seconds . ,(and clock end-clock (abs (- (cadr end-clock) (cadr clock)))))
                    (records . ,(vconcat (nreverse records))))))))))

@@ -17,6 +17,11 @@
   "Project-relative port file written by coil-live-nrepl."
   :type 'string)
 
+(defcustom coil-live-publication-policy "strict"
+  "Use strict rejection or publish checked blocked entries with deferred policy."
+  :type '(choice (const "strict") (const "deferred")))
+(make-variable-buffer-local 'coil-live-publication-policy)
+
 (defvar-local coil-live-connection nil)
 (defvar-local coil-live-last-revision nil)
 (defvar coil-live-response-hook nil
@@ -35,7 +40,7 @@
   (let* ((connection (coil-live--connection))
          (started (or submitted (float-time))))
     (nrepl-send-request
-     (append fields (list "ns" (coil-live--namespace)
+     (append fields (list "policy" coil-live-publication-policy "ns" (coil-live--namespace)
                           "file-path" (or buffer-file-name "<buffer>")
                           "line" (number-to-string (line-number-at-pos))))
      (lambda (response)
@@ -107,7 +112,7 @@
       (progn (call-interactively #'coil-live-connect) coil-live-connection)))
 
 (defun coil-live--show-error (response)
-  (let ((diagnostic (or (nrepl-dict-get response "err") "Coil edit failed")))
+  (let ((diagnostic (or (nrepl-dict-get response "err") (nrepl-dict-get response "diagnostic") "Coil edit failed")))
     (with-current-buffer (get-buffer-create "*coil-diagnostics*")
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -117,15 +122,17 @@
 
 (defun coil-live--handler (origin)
   (lambda (response)
-    (cond
-     ((nrepl-dict-get response "err") (coil-live--show-error response))
-     ((nrepl-dict-get response "revision")
-      (when (buffer-live-p origin)
-        (with-current-buffer origin
-          (setq coil-live-last-revision (nrepl-dict-get response "revision"))))
-      (message "Coil revision %s" (nrepl-dict-get response "revision")))
-     ((nrepl-dict-get response "value")
-      (message "%s" (nrepl-dict-get response "value"))))
+    (let ((revision (nrepl-dict-get response "revision"))
+          (value (nrepl-dict-get response "value")))
+      (when (and revision (buffer-live-p origin))
+        (with-current-buffer origin (setq coil-live-last-revision revision)))
+      (cond
+       ((or (nrepl-dict-get response "err")
+            (member "blocked" (nrepl-dict-get response "status")))
+        (coil-live--show-error response)
+        (when revision (message "Coil revision %s has blocked functions" revision)))
+       (value (message "%s" value))
+       (revision (message "Coil revision %s" revision))))
     (when (member "done" (nrepl-dict-get response "status"))
       (when (buffer-live-p origin)
         (with-current-buffer origin (font-lock-flush))))))

@@ -12,7 +12,7 @@
 ;;; Keys are module + declaration kind + authored name, never a leaf name alone.
 (defstruct Form [(module (slice u8)) (kind (slice u8)) (name (slice u8))
   (desired (slice u8)) (accepted (slice u8)) (diagnostic (slice u8))
-  (attempt i64) (revision i64) (lo i64) (hi i64)])
+  (attempt i64) (revision i64) (lo i64) (hi i64) (condition i64)])
 (defstruct Ledger [(forms (al/ArrayList Form)) (attempt i64)
   (latest (slice u8)) (diagnostic (slice u8))])
 (defn copy [(text (slice u8))] (-> (slice u8))
@@ -43,7 +43,7 @@
     (when (< known 0)
       (al/al-push! (field ledger forms)
         (Form :module (copy module) :kind (copy kind) :name (copy name)
-          :desired "" :accepted "" :diagnostic "" :attempt 0 :revision 0 :lo 0 :hi 0)))
+          :desired "" :accepted "" :diagnostic "" :attempt 0 :revision 0 :lo 0 :hi 0 :condition 0)))
     (let [f (al/al-elem [Form] (field ledger forms) index)]
       (replace! (field f desired) text)
       (replace! (field f diagnostic) "")
@@ -82,9 +82,16 @@
   (for [i 0 (al/al-len (.forms ledger))]
     (let [f (al/al-elem [Form] (field ledger forms) i)]
       (when (= (.attempt f) (.attempt ledger))
-        (if (= status 0)
+        (if (and (= status 0) (= (.condition f) 0))
           (do (replace! (field f accepted) (.desired f)) (set! (.revision f) revision) 0)
           (replace! (field f diagnostic) (.diagnostic ledger))))))
+  0)
+(defn stage-condition! [(ledger (ptr Ledger)) (module (slice u8)) (name (slice u8)) (condition i64)] (-> i64)
+  (let [index (find ledger module "defn" name)]
+    (assert (>= index 0))
+    (let [form (al/al-elem [Form] (field ledger forms) index)]
+      (assert (= (.attempt form) (.attempt ledger)))
+      (set! (.condition form) condition)))
   0)
 (defn destroy! [(ledger (ptr Ledger))] (-> i64)
   (let [allocator (a/malloc-allocator)]
@@ -104,17 +111,20 @@
       (if (not (reader/sexp-sym? head)) false
         (let [name (reader/sexp-sym head)]
           (or (= name "live-poc-coil.meta/evaluate") (or (= name "checker") (or (= name "transform") (or (= name "deftrait") (or (= name "impl") (or (= name "cimport") (or (= name "extern") (or (= name "export-c") (or (= name "export") (or (= name "import") (or (= name "const") (or (= name "derive") (or (= name "module") (declaration? name)))))))))))))))))))
-(defstruct Prepared [(text (slice u8)) (diagnostic (slice u8))])
+(defstruct Prepared [(text (slice u8)) (diagnostic (slice u8)) (evaluation bool)])
 (defn prepare [(allocator (dyn a/Allocator)) (text (slice u8))] (-> Prepared)
   (match (reader/read-all allocator text 0)
-    (Err [_] (Prepared :text text :diagnostic ""))
+    (Err [_] (Prepared :text text :diagnostic "" :evaluation false))
     (Ok [forms]
       (let [(mut declarations) (str/sb-new allocator)
             (mut expressions) (str/sb-new allocator)
-            (mut count) 0 (mut invalid) false]
+            (mut count) 0 (mut invalid) false (mut explicit-evaluation) false]
         (for [i 0 (al/al-len (load forms))]
           (let [f (al/al-elem [reader/Sexp] forms i)
                 bytes (slice/subslice text (.lo f) (.hi f))]
+            (when (and (reader/sexp-list? f) (> (reader/sexp-count f) 0))
+              (when (reader/sexp-sym-is (reader/sexp-nth f 0) "live-poc-coil.meta/evaluate")
+                (set! explicit-evaluation true) 0))
             (if (top-level? f)
               (do
                 (when (and (> (load count) 0)
@@ -130,4 +140,5 @@
           (str/sb-push-str! (mut declarations) (str/sb-str (load expressions)))
           (str/sb-push-str! (mut declarations) "))"))
         (Prepared :text (str/sb-str (load declarations))
+          :evaluation (or (> (load count) 0) (load explicit-evaluation))
           :diagnostic (if (load invalid) "submit expressions from one module at a time" ""))))))
