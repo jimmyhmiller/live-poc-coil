@@ -1,0 +1,69 @@
+(module live-poc-coil.relocation)
+(import "coil.primitive" :as p)
+(import "live-poc-coil.fallible-list" :as list)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+;;; Object references use exact base identity. Interior ranges are registered
+;;; separately by an owning value policy that preserves element representation.
+;;; Reordered struct fields must never be relocated by guessing byte offsets.
+(defstruct Object [(old (ptr i8)) (next (ptr i8)) (logical i64)])
+(defstruct Range [(old (ptr i8)) (next (ptr i8)) (old-bytes i64) (next-bytes i64)])
+(defstruct Journal [(objects (al/ArrayList Object)) (ranges (al/ArrayList Range))])
+(defn init! [(journal (ptr Journal)) (allocator (dyn a/Allocator))] (-> i64)
+  (set! (.objects journal) (al/al-new [Object] allocator))
+  (set! (.ranges journal) (al/al-new [Range] allocator)) 0)
+(defn reset! [(journal (ptr Journal))] (-> i64)
+  (set! (.len (field journal objects)) 0) (set! (.len (field journal ranges)) 0) 0)
+(defn object! [(journal (ptr Journal)) (old (ptr i8)) (next (ptr i8)) (logical i64)] (-> i64)
+  (block :done
+    (when (or (= (p/cast i64 old) 0) (= (p/cast i64 next) 0)) (break :done -1))
+    (for [i 0 (al/al-len (.objects journal))]
+      (let [entry (al/al-get (.objects journal) i)]
+        (when (= (.old entry) old) (break :done -1))))
+    (list/push! (field journal objects) (Object :old old :next next :logical logical))))
+(defn reference! [(journal (ptr Journal)) (slot (ptr (ptr i8))) (logical i64)] (-> i64)
+  (block :done
+    (when (= (p/cast i64 (load slot)) 0) (break :done 0))
+    (for [i 0 (al/al-len (.objects journal))]
+      (let [entry (al/al-get (.objects journal) i)]
+        (when (and (= (.old entry) (load slot)) (= (.logical entry) logical))
+          (store! slot (.next entry)) (break :done 0))))
+    -1))
+(defn range! [(journal (ptr Journal)) (old (ptr i8)) (old-bytes i64)
+             (next (ptr i8)) (next-bytes i64)] (-> i64)
+  (block :done
+    (when (or (< old-bytes 0) (< next-bytes 0)) (break :done -1))
+    (when (and (= old-bytes 0) (= (p/cast i64 old) 0)) (break :done 0))
+    (when (or (= (p/cast i64 old) 0) (= (p/cast i64 next) 0)) (break :done -1))
+    (let [base (p/cast u64 old) destination (p/cast u64 next)]
+      (when (or (> (p/cast u64 old-bytes) (- (p/cast u64 -1) base))
+                (> (p/cast u64 next-bytes) (- (p/cast u64 -1) destination))) (break :done -1))
+      (for [i 0 (al/al-len (.ranges journal))]
+        (let [entry (al/al-get (.ranges journal) i) other (p/cast u64 (.old entry))]
+          (when (or (= other base)
+                    (and (< base (+ other (p/cast u64 (.old-bytes entry))))
+                         (< other (+ base (p/cast u64 old-bytes))))) (break :done -1)))))
+    (list/push! (field journal ranges)
+      (Range :old old :next next :old-bytes old-bytes :next-bytes next-bytes))))
+(defn slice! [(journal (ptr Journal)) (slot (ptr (ptr i8))) (count i64) (element-size i64)] (-> i64)
+  (block :done
+    (when (or (< count 0) (<= element-size 0)) (break :done -1))
+    (when (> count (/ 9223372036854775807 element-size)) (break :done -1))
+    (when (= (p/cast i64 (load slot)) 0) (break :done (if (= count 0) 0 -1)))
+    (let [address (p/cast u64 (load slot)) bytes (* count element-size)
+          (mut found) 0 (mut target) (p/cast (ptr i8) 0)]
+      (for [i 0 (al/al-len (.ranges journal))]
+        (let [entry (al/al-get (.ranges journal) i) base (p/cast u64 (.old entry))]
+          (when (>= address base)
+            (let [distance (- address base)]
+              (when (and (<= distance (p/cast u64 (.old-bytes entry)))
+                         (<= distance (p/cast u64 (.next-bytes entry))))
+                (let [offset (p/cast i64 distance)]
+                  (when (and (<= bytes (- (.old-bytes entry) offset))
+                             (<= bytes (- (.next-bytes entry) offset)))
+                    (set! found (+ (load found) 1))
+                    (set! target (p/index (.next entry) offset)))))))))
+      (when (!= (load found) 1) (break :done -1))
+      (store! slot (load target)) 0)))
+(defn destroy! [(journal (ptr Journal))] (-> i64)
+  (al/al-free! (field journal objects)) (al/al-free! (field journal ranges)) 0)

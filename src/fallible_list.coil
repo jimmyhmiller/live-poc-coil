@@ -1,0 +1,22 @@
+(module live-poc-coil.fallible-list)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.slice" :as slice)
+;;; ArrayList's normal reserve aborts on allocation failure. Transactional graph
+;;; preparation needs a recoverable result, while retaining its existing buffer.
+(defn reserve! [T] [(list (mut (al/ArrayList T))) (capacity i64)] (-> i64)
+  (cond (< capacity 0) -4
+        (<= capacity (.cap list)) 0
+        (> capacity (/ 9223372036854775807 (p/sizeof T))) -4
+        true
+          (match (a/reallocate [T] (.alc list) (slice/slice-new (.data list) (.cap list)) capacity)
+            (None [] -4)
+            (Some [memory]
+              (set! (.data list) (slice/slice-data memory)) (set! (.cap list) capacity) 0))))
+(defn push! [T] [(list (mut (al/ArrayList T))) (value T)] (-> i64)
+  (let [status (if (< (.len list) (.cap list)) 0
+                (if (> (.cap list) (/ 9223372036854775807 2)) -4
+                  (reserve! (mut list) (if (= (.cap list) 0) 4 (* (.cap list) 2)))))]
+    (when (= status 0) (al/al-push! (mut list) value))
+    status))

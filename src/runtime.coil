@@ -4,6 +4,8 @@
 (import "coil.arraylist" :as al)
 (import "coil.slice" :as slice)
 (import "coil.sync" :as sync)
+(import "coil.atomic" :as atomic)
+(import "coil.time" :as time)
 (import "coil.result" :use *)
 
 (cimport "pthread.h"
@@ -29,6 +31,8 @@
    (views (al/ArrayList (ptr View)))
    (images (al/ArrayList (ptr Image)))
    (key u64)
+   (quiescence sync/Event)
+   (layout-closed bool)
    (closed bool)])
 
 (defn lock! [(r (ptr Runtime))] (-> i64)
@@ -64,6 +68,8 @@
                 0)
             (do (sync/mutex-destroy! (field r mutex)) -2)
             (do
+              (match (sync/event-init (field r quiescence))
+                (Ok [_] 0) (Err [_] (a/oom-at c"layout quiescence event" 0)))
               (set! (.views r) (al/al-new [(ptr View)] (a/malloc-allocator)))
               (set! (.images r) (al/al-new [(ptr Image)] (a/malloc-allocator)))
               (set! (.current r) (view-new 0))
@@ -185,7 +191,7 @@
 (defn enter! [(r (ptr Runtime))] (-> (ptr View))
   (assert (= (p/cast i64 (pthread_getspecific (.key r))) 0))
   (lock! r)
-  (let [v (if (.closed r) (p/cast (ptr View) 0) (.current r))]
+  (let [v (if (or (.closed r) (.layout-closed r)) (p/cast (ptr View) 0) (.current r))]
     (when (!= (p/cast i64 v) 0) (set! (.readers v) (+ (.readers v) 1)))
     (unlock! r)
     (assert (= (pthread_setspecific (.key r) (p/cast (ptr i8) v)) 0))
@@ -198,7 +204,7 @@
   (assert (= (p/cast i64 (pthread_getspecific (.key r))) 0))
   (lock! r)
   (let [(mut admitted) (p/cast (ptr View) 0)]
-    (unless (.closed r)
+    (unless (or (.closed r) (.layout-closed r))
       (let [v (.current r)]
         (when (and (>= id 0) (< id (al/al-len (.entries v))))
           (let [entry (al/al-get (.entries v) id)]
@@ -213,7 +219,7 @@
   (!= (p/cast i64 (pthread_getspecific (.key r))) 0))
 (defn blocked? [(r (ptr Runtime))] (-> bool)
   (lock! r)
-  (let [(mut blocked) false]
+  (let [(mut blocked) (.layout-closed r)]
     (unless (.closed r)
       (for [i 0 (al/al-len (.entries (.current r)))]
         (let [entry (al/al-get (.entries (.current r)) i)]
@@ -228,7 +234,47 @@
     (lock! r)
     (assert (> (.readers v) 0))
     (set! (.readers v) (- (.readers v) 1))
-    (unlock! r)))
+    (let [notify (.layout-closed r)]
+      (unlock! r)
+      (when notify
+        (match (sync/event-notify-all! (field r quiescence))
+          (Ok [_] 0) (Err [_] (a/oom-at c"layout completion notification" 0)))))
+    0))
+
+;;; A conservative global admission barrier for incompatible layouts. Closing
+;;; admission never waits. Only the compiler lane drains, with the mutex released
+;;; so native callbacks can finish and the main event loop can return promptly.
+(defn close-layout! [(r (ptr Runtime))] (-> i64)
+  (assert (not (pinned? r)))
+  (lock! r)
+  (assert (not (.closed r)))
+  (set! (.layout-closed r) true)
+  (unlock! r))
+(defn reopen-layout! [(r (ptr Runtime))] (-> i64)
+  (lock! r)
+  (set! (.layout-closed r) false)
+  (unlock! r))
+(defn drain-layout! [(r (ptr Runtime)) (cancel (ptr i64))] (-> i64)
+  (assert (not (pinned? r)))
+  (let [duration (match (time/duration-millis 10)
+                   (Ok [value] value) (Err [_] (p/zeroed time/Duration)))]
+    (block :done
+      (loop
+        (lock! r)
+        (assert (.layout-closed r))
+        (let [(mut readers) 0
+              generation (match (sync/event-generation (field r quiescence))
+                           (Ok [value] value) (Err [_] -1))]
+          (assert (>= generation 0))
+          (for [i 0 (al/al-len (.views r))]
+            (set! readers (+ (load readers) (.readers (al/al-get (.views r) i)))))
+          (unlock! r)
+          (when (and (!= (p/cast i64 cancel) 0) (!= (atomic/atomic-load cancel) 0))
+            (break :done 3))
+          (when (= (load readers) 0) (break :done 0))
+          (match (sync/event-wait-for! (field r quiescence) generation duration)
+            (Ok [_] 0) (Err [_] (break :done -1)))))
+      -1)))
 
 (defn resolve [(r (ptr Runtime)) (id i64)] (-> (ptr i8))
   (let [v (p/cast (ptr View) (pthread_getspecific (.key r)))]
@@ -283,4 +329,5 @@
   (al/al-free! (field r views))
   (al/al-free! (field r images))
   (assert (= (pthread_key_delete (.key r)) 0))
+  (sync/event-destroy! (field r quiescence))
   (match (sync/mutex-destroy! (field r mutex)) (Ok [n] n) (Err [_] -1)))
