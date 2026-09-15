@@ -21,6 +21,12 @@
   (set! (.samples (state)) (al/al-new [Sample] (a/malloc-allocator)))
   (al/al-push! (field (state) samples) (p/zeroed Sample))
   0)
+(defn reserve! [] (-> i64)
+  (lock!)
+  (let [samples (field (state) samples)]
+    (when (= (.len samples) (.cap samples))
+      (al/al-reserve! samples (if (= (.cap samples) 0) 4 (* (.cap samples) 2)))))
+  (unlock!))
 (defn record! [(revision i64) (received f64) (start f64) (end f64) (published f64)] (-> i64)
   (lock!)
   (assert (= revision (al/al-len (.samples (state)))))

@@ -8,6 +8,8 @@
 (defannotation :live/definition i64)
 (defannotation :live/publication bool)
 
+(extern lpc_preflight :cc c [] (-> i64))
+
 (extern lpc_stage :cc c [i64 (ptr i8)] (-> i64))
 
 (extern lpc_resolve :cc c [i64] (-> (ptr i8)))
@@ -209,7 +211,7 @@
                                  :live/publication true
                                  ~(p/code-nth f 2)
                                  ~(p/code-nth f 3)
-                                 (do ~@(p/code-list-done updates) 0)))
+                                 (do ~@(p/code-list-done updates) (lpc_preflight))))
           0)))
     (p/code-list-done out)))
 

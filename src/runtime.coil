@@ -162,18 +162,26 @@
 
 ;;; The staged code is still private. Reserve its exact generation ownership
 ;;; before making a pointer visible to any application invocation.
-(defn own-staged! [(r (ptr Runtime)) (v (ptr View)) (token i64)] (-> i64)
+(defn reserve-publication! [(r (ptr Runtime))] (-> i64)
+  (let [images (field r images) views (field r views)]
+    (when (= (.len images) (.cap images))
+      (al/al-reserve! images (if (= (.cap images) 0) 4 (* (.cap images) 2))))
+    (when (= (.len views) (.cap views))
+      (al/al-reserve! views (if (= (.cap views) 0) 4 (* (.cap views) 2))))) 0)
+(defn own-reserved! [(r (ptr Runtime)) (v (ptr View)) (image (ptr Image)) (token i64)] (-> i64)
   (assert (> token 0))
-  (let [image
-          (a/box! (a/malloc-allocator) Image (Image :token token :references 0))]
-    (for [i 0 (al/al-len (.entries v))]
-      (let [e (al/al-elem (field v entries) i)]
-        (when (and (= (p/cast i64 (.image e)) 0)
-                   (!= (p/cast i64 (.address e)) 0))
-          (set! (.image e) image)
-          (set! (.references image) (+ (.references image) 1)))))
-    (al/al-push! (field r images) image))
-  0)
+  (assert (< (al/al-len (.images r)) (.cap (field r images))))
+  (set! (.token image) token)
+  (for [i 0 (al/al-len (.entries v))]
+    (let [e (al/al-elem (field v entries) i)]
+      (when (and (= (p/cast i64 (.image e)) 0) (!= (p/cast i64 (.address e)) 0))
+        (set! (.image e) image)
+        (set! (.references image) (+ (.references image) 1)))))
+  (al/al-push! (field r images) image) 0)
+(defn own-staged! [(r (ptr Runtime)) (v (ptr View)) (token i64)] (-> i64)
+  (let [image (a/box! (a/malloc-allocator) Image (p/zeroed Image))]
+    (reserve-publication! r)
+    (own-reserved! r v image token)))
 
 (defn publish! [(r (ptr Runtime)) (v (ptr View))] (-> i64)
   (propagate! v)

@@ -22,7 +22,7 @@ This first barrier closes all application roots. Per-layout admission and foreig
 
 ## Verified
 
-The native suite has 37 passing tests. Migration contracts cover:
+The native suite has 38 passing tests. Migration contracts cover:
 
 - Reordered fields and a new default, with stable object identity.
 - Two-object cycles and references from an unchanged nominal type.
@@ -30,6 +30,12 @@ The native suite has 37 passing tests. Migration contracts cover:
 - Missing exact edges, failed copying, failed validation, and cancellation.
 - Allocation fault injection across transaction construction, with zero remaining allocator-owned blocks after shutdown.
 - New work denied during layout drain, old pinned work completing, and explicit reopening.
+
+## Publication reservation
+
+The native publication entry calls a host preflight before returning success to the JIT. It prepares source replacement ownership and reserves runtime and timing registries. Source publication swaps owned strings; old strings are freed after the view is consistent. Cancellation is checked again in that preflight. The image record is allocated before compilation, then receives its generation token after native acceptance.
+
+The graph is not yet attached to this hook. The SDK's generation-token acquisition remains after native acceptance; its reservation and failure contract still needs to be audited as part of coordinated schema publication.
 
 ## Remaining integration
 

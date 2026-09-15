@@ -1,0 +1,38 @@
+(module live-poc-coil.source-plan-test)
+(import "coil.primitive" :as p)
+(import "coil.arraylist" :as al)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.source" :as source)
+(import "live-poc-coil.source-plan" :as plan)
+(deftest source-publication-prepares-owned-replacements-before-swapping
+  (let [ledger (p/alloc-stack source/Ledger) candidate (p/alloc-stack plan/Plan)
+        outcomes (p/alloc-stack (array plan/Outcome 2))]
+    (source/init! ledger) (plan/init! candidate)
+    (source/begin! ledger "(module demo) (defn f [] (-> i64) 1) (defn g [] (-> i64) 2)")
+    (source/finish! ledger 0 1 "")
+    (source/begin! ledger "(module demo) (defn f [] (-> i64) true) (defn g [] (-> i64) 3)")
+    (store! (p/index outcomes 0) (plan/Outcome :index 0 :condition 9))
+    (store! (p/index outcomes 1) (plan/Outcome :index 1 :condition 0))
+    (let [items (slice/slice-new (p/cast (ptr plan/Outcome) outcomes) 2)]
+      (assert (= (plan/prepare! candidate ledger items 2 "bad f") 0))
+      (let [f (al/al-get (.forms ledger) 0) g (al/al-get (.forms ledger) 1)]
+        (assert (= (.accepted f) "(defn f [] (-> i64) 1)"))
+        (assert (= (.accepted g) "(defn g [] (-> i64) 2)"))
+        (assert (= (.condition f) 0)))
+      (plan/clear! candidate)
+      (assert (= (plan/prepare! candidate ledger items 2 "bad f") 0))
+      (plan/publish! candidate ledger)
+      (plan/clear! candidate)
+      (let [f (al/al-get (.forms ledger) 0) g (al/al-get (.forms ledger) 1)]
+        (assert (= (.accepted f) "(defn f [] (-> i64) 1)"))
+        (assert (= (.accepted g) "(defn g [] (-> i64) 3)"))
+        (assert (= (.diagnostic f) "bad f"))
+        (assert (= (.condition f) 9)) (assert (= (.revision f) 1)) (assert (= (.revision g) 2)))
+      (source/begin! ledger "(module demo) (defn f [] (-> i64) 4)")
+      (store! (p/index outcomes 0) (plan/Outcome :index 0 :condition 0))
+      (assert (= (plan/prepare! candidate ledger items 3 "") 0))
+      (plan/publish! candidate ledger) (plan/clear! candidate)
+      (let [f (al/al-get (.forms ledger) 0)]
+        (assert (= (.accepted f) "(defn f [] (-> i64) 4)"))
+        (assert (= (.diagnostic f) "")) (assert (= (.condition f) 0)) (assert (= (.revision f) 3))))
+    (plan/destroy! candidate) (source/destroy! ledger)))

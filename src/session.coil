@@ -11,6 +11,7 @@
 (import "live-poc-coil.pending" :as pending)
 (import "live-poc-coil.metrics" :as metrics)
 (import "live-poc-coil.source" :as source)
+(import "live-poc-coil.source-plan" :as source-plan)
 (import "coil.atomic" :as atomic)
 (import "coil.str" :as str)
 (import "coil.slice" :as slice)
@@ -18,7 +19,6 @@
 
 ;;; One application world per host process. Editor connections share this world.
 ;;; The process owns this stable bridge for the complete native session lifetime.
-(defstruct SourceOutcome [(index i64) (condition i64)])
 (defstruct Session
   [(arena scratch/ScratchArena)
    (compiler jit/JitSession)
@@ -27,7 +27,11 @@
    (pending pending/Queue)
    (writer sync/Mutex)
    (metadata sync/Mutex)
-   (outcomes (al/ArrayList SourceOutcome))
+   (outcomes (al/ArrayList source-plan/Outcome))
+   (source-plan source-plan/Plan)
+   (blocked-candidate bool)
+   (cancel (ptr i64))
+   (preflight-status i64)
    (staging (ptr rt/View))
    (evaluation (ptr i8))
    (result (slice u8))
@@ -59,7 +63,7 @@
   (let [index (source/find (field (instance) sources)
                (slice/slice-new module module-length) "defn" (slice/slice-new name name-length))]
     (assert (>= index 0))
-    (al/al-push! (field (instance) outcomes) (SourceOutcome :index index :condition condition)))
+    (al/al-push! (field (instance) outcomes) (source-plan/Outcome :index index :condition condition)))
   (metadata-unlock!))
 (export-c [stage-blocked :as "lpc_stage_blocked"] [stage-source :as "lpc_stage_source"])
 
@@ -74,6 +78,26 @@
   (set! (.result-overflow (instance)) (!= overflow 0))
   0)
 (export-c [stage-evaluation :as "lpc_stage_eval"] [capture-result :as "lpc_result"])
+
+(defn preflight-native [] (-> i64)
+  (let [s (instance)]
+    (if (cancelled? (.cancel s))
+      (set! (.preflight-status s) 3)
+      (do
+        (rt/propagate! (.staging s))
+        (rt/reserve-publication! (field s runtime))
+        (metrics/reserve!)
+        (metadata-lock!)
+        (set! (.preflight-status s)
+          (source-plan/prepare! (field s source-plan) (field s sources)
+            (slice/slice-new (.data (field s outcomes)) (al/al-len (.outcomes s)))
+            (.revision (.staging s)) (if (.blocked-candidate s) (.diagnostic (.sources s)) "")))
+        (metadata-unlock!)
+        (when (cancelled? (.cancel s))
+          (source-plan/clear! (field s source-plan))
+          (set! (.preflight-status s) 3))))
+    (.preflight-status s)))
+(export-c [preflight-native :as "lpc_preflight"])
 
 (defn resolve-native [(id i64)] (-> (ptr i8))
   (rt/resolve (field (instance) runtime) id))
@@ -100,7 +124,7 @@
       (Err [_] (a/oom-at c"writer mutex" 0)))
     (match (sync/mutex-init (field s metadata))
       (Ok [_] 0) (Err [_] (a/oom-at c"metadata mutex" 0)))
-    (set! (.outcomes s) (al/al-new [SourceOutcome] (a/malloc-allocator)))
+    (set! (.outcomes s) (al/al-new [source-plan/Outcome] (a/malloc-allocator)))
     (scratch/scratch-init (field s arena) (a/malloc-allocator))
     (let [toolchain (getenv c"LPC_TOOLCHAIN")]
       (set! (.compiler s) (jit/jit-session-new-with-toolchain (scratch/scratch-allocator (field s arena))
@@ -110,6 +134,7 @@
     (set! (.result s) "")
     (set! (.result-overflow s) false)
     (source/init! (field s sources))
+    (source-plan/init! (field s source-plan))
     (metrics/init!)
     (atomic/atomic-store (published-epoch) 0)
     (set! (.initialized s) true)
@@ -206,12 +231,15 @@
   (do
     (writer-lock!)
     (let [s (instance) r (field s runtime) candidate (rt/clone-current! r)
+          image (a/box! (a/malloc-allocator) rt/Image (p/zeroed rt/Image))
           start (metrics/now) (mut status) 0 (mut blocked) false
           input-arena (p/alloc-stack scratch/ScratchArena)]
       (scratch/scratch-init input-arena (a/malloc-allocator))
       (source/replace! (field s result) "")
       (set! (.result-overflow s) false)
       (set! (.evaluation s) (p/cast (ptr i8) 0))
+      (set! (.cancel s) cancel)
+      (set! (.preflight-status s) 0)
       (set! (.len (field s outcomes)) 0)
       (metadata-lock!)
       (source/begin! (field s sources) source)
@@ -238,31 +266,30 @@
         (when (jit/jit-prepared? (field s compiler)) (jit/jit-abort-prepared! (field s compiler)))
         (set! status 3)
         (set-diagnostic! "request interrupted before publication"))
+      (set! (.blocked-candidate s) (load blocked))
       (when (= (load status) 0)
         (set! status (jit/jit-publish-prepared! (field s compiler)))
         (when (!= (load status) 0)
-          (set-diagnostic! (jit/jit-diagnostic (field s compiler)))))
+          (when (!= (.preflight-status s) 0) (set! status (.preflight-status s)))
+          (set-diagnostic! (if (= (load status) 3) "request interrupted before publication"
+                             (jit/jit-diagnostic (field s compiler))))))
       (metadata-lock!)
-      (when (= (load status) 0)
-        (for [i 0 (al/al-len (.outcomes s))]
-          (let [outcome (al/al-get (.outcomes s) i)
-                form (al/al-elem [source/Form] (field (field s sources) forms) (.index outcome))]
-            (set! (.condition form) (.condition outcome)))))
-      (source/finish! (field s sources) (load status)
-        (if (= (load status) 0) (.revision candidate) (current-revision))
-        (if (and (= (load status) 0) (not (load blocked))) "" (.diagnostic (.sources s))))
+      (if (= (load status) 0)
+        (source-plan/publish! (field s source-plan) (field s sources))
+        (source/finish! (field s sources) (load status) (current-revision) (.diagnostic (.sources s))))
       (let [end (metrics/now)]
         (if (= (load status) 0)
           (let [token (jit/jit-generation-retain-current! (field s compiler))]
             (assert (> token 0))
-            (rt/own-staged! r candidate token)
+            (rt/own-reserved! r candidate image token)
             ; Install timing storage before the new view can be drawn.
             (metrics/record! (.revision candidate) received start end (metrics/now))
             (rt/publish! r candidate)
             (atomic/atomic-store (published-epoch) (.revision candidate))
             (when (!= (p/cast i64 committed) 0) (atomic/atomic-store committed 1)))
-          (rt/drop-view! candidate)))
+          (do (rt/drop-view! candidate) (rt/free-one! image))))
       (metadata-unlock!)
+      (source-plan/clear! (field s source-plan))
       (when (and (= (load status) 0) (!= (p/cast i64 (.evaluation s)) 0))
         (assert (= (control/bind! cancel) 0))
         (enter!)
@@ -271,6 +298,7 @@
         (assert (= (control/unbind!) 0)))
       (set! (.evaluation s) (p/cast (ptr i8) 0))
       (set! (.staging s) (p/cast (ptr rt/View) 0))
+      (set! (.cancel s) (p/cast (ptr i64) 0))
       ; The accepted native view is usable now. Compact its owned compiler
       ; metadata while the main thread renders; keep the writer lane serialized.
       (when (= (load status) 0)
@@ -312,6 +340,7 @@
           (pending/destroy! (field s pending))
           (metrics/destroy!)
           (source/destroy! (field s sources))
+          (source-plan/destroy! (field s source-plan))
           (al/al-free! (field s outcomes))
           (sync/mutex-destroy! (field s metadata))
           (a/free (a/malloc-allocator) (.result s))
