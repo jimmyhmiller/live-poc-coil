@@ -29,6 +29,16 @@
                    (= (p/code-str (p/code-nth candidate 1)) (p/code-str type)))
           (break :found candidate))))
     '()))
+(defn physical-type [(schemas Code) (module Code) (type Code)] (-> Code)
+  (if (p/code-sym? type)
+    (let [record (schema-for-type schemas module type)]
+      (if (> (p/code-count record) 0) (p/code-nth record 4) type))
+    (if (or (p/code-list? type) (p/code-vector? type))
+      (let [parts (p/code-list-new)]
+        (for [i 0 (p/code-count type)]
+          (p/code-list-push! parts (physical-type schemas module (p/code-nth type i))))
+        (syntax/rebuild type (p/code-list-done parts)))
+      type)))
 (defn named-type-application? [(type Code) (plain (slice u8))
   (alias (slice u8)) (qualified (slice u8))] (-> bool)
   (and (p/code-list? type) (and (= (p/code-count type) 2)
@@ -264,12 +274,14 @@
       (for [i 0 count]
         (let [field (p/code-nth fields i) name (p/code-nth field 0)
               field-type (p/code-nth field 1)
+              new-physical (physical-type schemas (p/code-nth record 0) field-type)
               transition (transitions/for-edge record prior name)
               source-name (if (> (p/code-count transition) 8) (p/code-nth transition 8) name)
               old-index (field-index (p/code-nth prior 5) source-name)]
           (if (>= old-index 0)
             (let [old-field (p/code-nth (p/code-nth prior 5) old-index)
                   old-type (p/code-nth old-field 1)
+                  old-physical (physical-type prior-schemas (p/code-nth record 0) old-type)
                   current-child (schema-for-type schemas (p/code-nth record 0) field-type)
                   prior-child (schema-for-type prior-schemas (p/code-nth record 0) old-type)
                   nested-evolved (and (> (p/code-count current-child) 0)
@@ -295,33 +307,25 @@
                       (and (> (p/code-count slice-prior-child) 0)
                         (not (p/code-eq (p/code-nth slice-current-child 3)
                           (p/code-nth slice-prior-child 3)))))))
-                  directed-old (cond nested-evolved (p/code-nth prior-child 4)
-                    list-evolved `(al/ArrayList ~(p/code-nth list-prior-child 4))
-                    slice-evolved `(slice ~(p/code-nth slice-prior-child 4))
-                    :else old-type)
-                  directed-new (cond nested-evolved (p/code-nth current-child 4)
-                    list-evolved `(al/ArrayList ~(p/code-nth list-current-child 4))
-                    slice-evolved `(slice ~(p/code-nth slice-current-child 4))
-                    :else field-type)
                   status (p/fresh-identifier "structural-status")]
               (if (> (p/code-count transition) 0)
                 (let [copy (p/fresh-identifier "structural-transition")]
                   (p/code-list-push! out
                     `(defn* ~copy :jit/retain false :lpc/preparation true
-                      [(~(p/code-nth transition 5) ~(p/code-nth old-field 1))]
-                      (-> ~field-type) ~(p/code-nth transition 6)))
+                      [(~(p/code-nth transition 5) ~old-physical)]
+                      (-> ~new-physical) ~(p/code-nth transition 6)))
                   (p/code-list-push! structural
                     `(store! (field ~structural-next ~name)
                       (~copy ~(field-access structural-old source-name)))) 0)
                 (cond (or nested-evolved (or list-evolved slice-evolved))
                     (do (p/code-list-push! structural
-                          `(let [~status (migration/migrate! [~directed-old ~directed-new]
+                          `(let [~status (migration/migrate-value
                                            (mut (field ~structural-next ~name))
                                            (field ~structural-old ~source-name) ~structural-journal)]
                              (if (!= ~status 0) (break :migration-done ~status) 0))) 0)
                   (p/code-eq old-type field-type)
                     (do (p/code-list-push! structural
-                          `(let [~status (migration/clone! [~field-type]
+                          `(let [~status (migration/clone! [~new-physical]
                                            (field ~structural-old ~source-name)
                                            (mut (field ~structural-next ~name)) ~structural-journal)]
                              (if (!= ~status 0) (break :migration-done ~status) 0))) 0)
@@ -333,7 +337,7 @@
           (p/code-list-push! structural `(store! ~structural-prefix ~(+ i 1)))
           (p/code-list-push! structural-cleanup
             `(if (> (load ~structural-prefix) ~i)
-               (do (migration/abort! [~field-type]
+               (do (migration/abort! [~new-physical]
                      (mut (field ~structural-next ~name))) 0) 0)))) 0)
     (when (and (> (p/code-count prior) 0) (load structural-available))
       (p/code-list-push! out
@@ -374,14 +378,17 @@
     (p/code-list-push! out
       `(defn* ~registrar :jit/retain false :live/stage true [] (-> i64)
         (api/schema! (~descriptor))))
-    (when (and (> (p/code-count prior) 0) (load available))
+    (when (and (> (p/code-count prior) 0) (load structural-available))
       (let [prepare (p/fresh-identifier "state-transition") stage (p/fresh-identifier "state-edge")]
         (p/code-list-push! out
           `(defn* ~prepare :jit/retain false [(old (ptr i8)) (raw (ptr i8))
             (~migration-journal (ptr relocation/Journal)) (~migration-prefix (ptr i64))] (-> i64)
-            (block :done
-              (let [~source (p/cast (ptr ~(p/code-nth prior 4)) old) ~target (p/cast (ptr ~type) raw)]
-                ~@(p/code-list-done migration)) 0)))
+            (let [~source (p/cast (ptr ~(p/code-nth prior 4)) old)
+                  ~target (p/cast (ptr ~type) raw)
+                  status (migration/migrate-value
+                           (mut ~target) ~source ~migration-journal)]
+              (when (= status 0) (store! ~migration-prefix ~count))
+              status)))
         (when (load value-available)
           (p/code-list-push! out
             `(defn* ~value-migrate :jit/retain false

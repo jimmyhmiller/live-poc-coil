@@ -37,10 +37,6 @@
   (abort-value (mut value)))
 (defn retire! [(T ValuePolicy)] [(value (mut T))] (-> void)
   (retire-value (mut value)))
-(defn migrate! [Old (New (Migration Old))]
-  [(next (mut New)) (old (ref Old))
-   (journal (ptr relocation/Journal))] (-> i64)
-  (migrate-value (mut next) old journal))
 
 (defn leaf-policy [(T Code)] (-> Code)
   `(do
@@ -82,8 +78,8 @@
   (abort-value [(value (mut (ptr T)))] (-> void))
   (retire-value [(value (mut (ptr T)))] (-> void)))
 
-(impl [Old New] Migration (ptr New)
-  (migrate-value [(next (mut (ptr New))) (old (ref (ptr Old)))
+(impl [From New] Migration (ptr New)
+  (migrate-value [(next (mut (ptr New))) (old (ref (ptr From)))
                   (journal (ptr relocation/Journal))] (-> i64)
     (store! next (p/cast (ptr New) (load old))) 0))
 
@@ -100,8 +96,8 @@
   (abort-value [(value (mut (slice T)))] (-> void))
   (retire-value [(value (mut (slice T)))] (-> void)))
 
-(impl [Old New] Migration (slice New)
-  (migrate-value [(next (mut (slice New))) (old (ref (slice Old)))
+(impl [From New] Migration (slice New)
+  (migrate-value [(next (mut (slice New))) (old (ref (slice From)))
                   (journal (ptr relocation/Journal))] (-> i64)
     (store! next
       (slice/slice-new (p/cast (ptr New) (slice/slice-data (load old)))
@@ -181,9 +177,9 @@
       (retire! [T] (p/index (.data value) i)))
     (list-release-storage! [T] value)))
 
-(impl [Old (New (Migration Old) ValuePolicy)] Migration (al/ArrayList New)
+(impl [From (New (Migration From) ValuePolicy)] Migration (al/ArrayList New)
   (migrate-value [(next (mut (al/ArrayList New)))
-                  (old (ref (al/ArrayList Old)))
+                  (old (ref (al/ArrayList From)))
                   (journal (ptr relocation/Journal))] (-> i64)
     (block :done
       (unless (list-header-valid? old) (break :done -1))
@@ -202,7 +198,7 @@
                     (al/ArrayList :data (p/cast (ptr New) raw)
                       :len 0 :cap capacity :alc allocator))
                   (when (!= (relocation/elements! journal
-                              (p/cast (ptr i8) (.data old)) capacity (p/sizeof Old)
+                              (p/cast (ptr i8) (.data old)) capacity (p/sizeof From)
                               raw capacity (p/sizeof New)) 0)
                     (list-release-storage! [New] next)
                     (break :done -1))
@@ -365,4 +361,4 @@
   (struct [T] (struct-policy T))
   (sum [T] (sum-policy T)))
 
-(export ValuePolicy Migration clone! rewrite! abort! retire! migrate! migrate-value)
+(export ValuePolicy Migration clone! rewrite! abort! retire! migrate-value)
