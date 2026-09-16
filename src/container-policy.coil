@@ -8,6 +8,31 @@
 ;;; Transactional policy for ArrayList's owned buffer. The list's allocator is
 ;;; part of its value, so a shadow allocation uses the same ownership domain.
 ;;; Registration happens before any borrowed slice is rewritten.
+(defn prepare! [Old New] [(old (ptr (al/ArrayList Old)))
+  (next (ptr (al/ArrayList New))) (journal (ptr relocation/Journal))] (-> i64)
+  (block :done
+    (let [length (.len old) capacity (.cap old) data (.data old) allocator (.alc old)]
+      (when (or (< length 0) (or (< capacity length)
+        (if (= capacity 0) (!= (p/cast i64 data) 0) (= (p/cast i64 data) 0))))
+        (break :done -1))
+      (store! next (al/ArrayList :data (p/cast (ptr New) 0) :len 0 :cap 0 :alc allocator))
+      (when (= capacity 0) (break :done 0))
+      (when (or (> capacity (/ 9223372036854775807 (p/sizeof Old)))
+                (> capacity (/ 9223372036854775807 (p/sizeof New)))) (break :done -1))
+      (let [bytes (* capacity (p/sizeof New))
+            request (a/AllocRequest :type-id 0 :count capacity :bytes bytes :align (p/alignof New))]
+        (match (a/raw-alloc allocator request)
+          (None [] (break :done -4))
+          (Some [raw]
+            (let [destination (p/cast (ptr New) raw)]
+              (store! next (al/ArrayList :data destination :len length :cap capacity :alc allocator))
+              (when (!= (relocation/elements! journal (p/cast (ptr i8) data) capacity (p/sizeof Old)
+                          raw capacity (p/sizeof New)) 0)
+                (a/raw-free allocator raw request)
+                (store! next (al/ArrayList :data (p/cast (ptr New) 0) :len 0 :cap 0 :alc allocator))
+                (break :done -1))
+              0)))))))
+
 (defn clone-copy! [(T Copy)] [(old (ptr (al/ArrayList T)))
   (next (ptr (al/ArrayList T))) (journal (ptr relocation/Journal))] (-> i64)
   (block :done
@@ -26,7 +51,8 @@
             (let [destination (p/cast (ptr T) raw)]
               (for [i 0 length] (store! (p/index destination i) (load (p/index data i))))
               (store! next (al/ArrayList :data destination :len length :cap capacity :alc allocator))
-              (when (!= (relocation/range! journal (p/cast (ptr i8) data) bytes raw bytes) 0)
+              (when (!= (relocation/elements! journal (p/cast (ptr i8) data) capacity (p/sizeof T)
+                          raw capacity (p/sizeof T)) 0)
                 (a/raw-free allocator raw request)
                 (store! next (al/ArrayList :data (p/cast (ptr T) 0) :len 0 :cap 0 :alc allocator))
                 (break :done -1))

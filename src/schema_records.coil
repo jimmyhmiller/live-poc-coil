@@ -24,16 +24,25 @@
       (p/error "schema physical name could not be represented as an identifier") 0)
     (p/code-nth parsed 1)))
 (defn schema? [(form Code)] (-> bool) (syntax/head? form `defstruct))
+(defn type-dependencies [(schemas Code) (module Code) (type Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (if (p/code-sym? type)
+      (for [si 0 (p/code-count schemas)]
+        (let [dep (p/code-nth schemas si)]
+          (when (and (p/code-eq (p/code-nth dep 0) module)
+                     (= (p/code-str (p/code-nth dep 1)) (p/code-str type)))
+            (p/code-list-push! out `(~(p/code-nth dep 2) ~(p/code-nth dep 3))) 0)))
+      (when (or (p/code-list? type) (p/code-vector? type))
+        (for [i 1 (p/code-count type)]
+          (let [nested (type-dependencies schemas module (p/code-nth type i))]
+            (for [j 0 (p/code-count nested)]
+              (p/code-list-push! out (p/code-nth nested j))))) 0))
+    (p/code-list-done out)))
 (defn dependency-versions [(schemas Code) (module Code) (fields Code)] (-> Code)
   (let [out (p/code-list-new)]
     (for [fi 0 (p/code-count fields)]
-      (let [type (p/code-nth (p/code-nth fields fi) 1)]
-        (when (p/code-sym? type)
-          (for [si 0 (p/code-count schemas)]
-            (let [dep (p/code-nth schemas si)]
-              (when (and (p/code-eq (p/code-nth dep 0) module)
-                         (= (p/code-str (p/code-nth dep 1)) (p/code-str type)))
-                (p/code-list-push! out `(~(p/code-nth dep 2) ~(p/code-nth dep 3))) 0))))))
+      (let [nested (type-dependencies schemas module (p/code-nth (p/code-nth fields fi) 1))]
+        (for [j 0 (p/code-count nested)] (p/code-list-push! out (p/code-nth nested j)))))
     (p/code-list-done out)))
 (defn dependencies-current? [(record Code) (schemas Code)] (-> bool)
   (and (> (p/code-count record) 9)

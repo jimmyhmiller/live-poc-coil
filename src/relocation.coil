@@ -7,7 +7,8 @@
 ;;; separately by an owning value policy that preserves element representation.
 ;;; Reordered struct fields must never be relocated by guessing byte offsets.
 (defstruct Object [(old (ptr i8)) (next (ptr i8)) (logical i64)])
-(defstruct Range [(old (ptr i8)) (next (ptr i8)) (old-bytes i64) (next-bytes i64)])
+(defstruct Range [(old (ptr i8)) (next (ptr i8)) (old-bytes i64) (next-bytes i64)
+  (old-stride i64) (next-stride i64)])
 (defstruct Journal [(objects (al/ArrayList Object)) (ranges (al/ArrayList Range))])
 (defn init! [(journal (ptr Journal)) (allocator (dyn a/Allocator))] (-> i64)
   (set! (.objects journal) (al/al-new [Object] allocator))
@@ -44,7 +45,29 @@
                     (and (< base (+ other (p/cast u64 (.old-bytes entry))))
                          (< other (+ base (p/cast u64 old-bytes))))) (break :done -1)))))
     (list/push! (field journal ranges)
-      (Range :old old :next next :old-bytes old-bytes :next-bytes next-bytes))))
+      (Range :old old :next next :old-bytes old-bytes :next-bytes next-bytes
+        :old-stride 0 :next-stride 0))))
+(defn elements! [(journal (ptr Journal)) (old (ptr i8)) (count i64) (old-stride i64)
+  (next (ptr i8)) (next-count i64) (next-stride i64)] (-> i64)
+  (block :done
+    (when (or (< count 0) (or (< next-count 0) (or (<= old-stride 0) (<= next-stride 0))))
+      (break :done -1))
+    (when (or (> count (/ 9223372036854775807 old-stride))
+              (> next-count (/ 9223372036854775807 next-stride))) (break :done -1))
+    (let [old-bytes (* count old-stride) next-bytes (* next-count next-stride)]
+      (when (and (= old-bytes 0) (= (p/cast i64 old) 0)) (break :done 0))
+      (when (or (= (p/cast i64 old) 0) (= (p/cast i64 next) 0)) (break :done -1))
+      (let [base (p/cast u64 old) destination (p/cast u64 next)]
+        (when (or (> (p/cast u64 old-bytes) (- (p/cast u64 -1) base))
+                  (> (p/cast u64 next-bytes) (- (p/cast u64 -1) destination))) (break :done -1))
+        (for [i 0 (al/al-len (.ranges journal))]
+          (let [entry (al/al-get (.ranges journal) i) other (p/cast u64 (.old entry))]
+            (when (or (= other base)
+                      (and (< base (+ other (p/cast u64 (.old-bytes entry))))
+                           (< other (+ base (p/cast u64 old-bytes))))) (break :done -1)))))
+      (list/push! (field journal ranges)
+        (Range :old old :next next :old-bytes old-bytes :next-bytes next-bytes
+          :old-stride old-stride :next-stride next-stride)))))
 (defn slice! [(journal (ptr Journal)) (slot (ptr (ptr i8))) (count i64) (element-size i64)] (-> i64)
   (block :done
     (when (or (< count 0) (<= element-size 0)) (break :done -1))
@@ -59,10 +82,19 @@
               (when (and (<= distance (p/cast u64 (.old-bytes entry)))
                          (<= distance (p/cast u64 (.next-bytes entry))))
                 (let [offset (p/cast i64 distance)]
-                  (when (and (<= bytes (- (.old-bytes entry) offset))
-                             (<= bytes (- (.next-bytes entry) offset)))
-                    (set! found (+ (load found) 1))
-                    (set! target (p/index (.next entry) offset)))))))))
+                  (if (= (.old-stride entry) 0)
+                    (when (and (<= bytes (- (.old-bytes entry) offset))
+                               (<= bytes (- (.next-bytes entry) offset)))
+                      (set! found (+ (load found) 1))
+                      (set! target (p/index (.next entry) offset)))
+                    (when (= (% offset (.old-stride entry)) 0)
+                      (let [index (/ offset (.old-stride entry))]
+                        (when (and (<= count (/ (- (.old-bytes entry) offset) (.old-stride entry)))
+                                   (and (= element-size (.next-stride entry))
+                                     (<= count (/ (- (.next-bytes entry) (* index (.next-stride entry)))
+                                                  (.next-stride entry)))))
+                          (set! found (+ (load found) 1))
+                          (set! target (p/index (.next entry) (* index (.next-stride entry))))))))))))))
       (when (!= (load found) 1) (break :done -1))
       (store! slot (load target)) 0)))
 ;;; Borrowed views may refer either into a migrated owned range or into stable
@@ -84,10 +116,19 @@
               (when (and (<= distance (p/cast u64 (.old-bytes entry)))
                          (<= distance (p/cast u64 (.next-bytes entry))))
                 (let [offset (p/cast i64 distance)]
-                  (when (and (<= bytes (- (.old-bytes entry) offset))
-                             (<= bytes (- (.next-bytes entry) offset)))
-                    (set! found (+ (load found) 1))
-                    (set! target (p/index (.next entry) offset)))))))))
+                  (if (= (.old-stride entry) 0)
+                    (when (and (<= bytes (- (.old-bytes entry) offset))
+                               (<= bytes (- (.next-bytes entry) offset)))
+                      (set! found (+ (load found) 1))
+                      (set! target (p/index (.next entry) offset)))
+                    (when (= (% offset (.old-stride entry)) 0)
+                      (let [index (/ offset (.old-stride entry))]
+                        (when (and (<= count (/ (- (.old-bytes entry) offset) (.old-stride entry)))
+                                   (and (= element-size (.next-stride entry))
+                                     (<= count (/ (- (.next-bytes entry) (* index (.next-stride entry)))
+                                                  (.next-stride entry)))))
+                          (set! found (+ (load found) 1))
+                          (set! target (p/index (.next entry) (* index (.next-stride entry))))))))))))))
       (when (> (load found) 1) (break :done -1))
       (when (= (load found) 1) (store! slot (load target)) 0)
       0)))

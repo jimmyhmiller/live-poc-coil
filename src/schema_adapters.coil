@@ -7,6 +7,7 @@
 (import "live-poc-coil.syntax-rewrite" :as syntax)
 (import "live-poc-coil.transitions" :as transitions)
 (import "live-poc-coil.container-policy" :as containers)
+(import "coil.slice" :as slice)
 (import "coil.jit.lifetime")
 
 ;;; Emit the trusted ownership ABI only after a generated pure identity helper
@@ -87,20 +88,45 @@
             transition (if (> (p/code-count prior) 0) (transitions/for-edge record prior name) '())
             source-name (if (> (p/code-count transition) 8) (p/code-nth transition 8) name)
             old-index (if (> (p/code-count prior) 0) (field-index (p/code-nth prior 5) source-name) -1)
-            list-field (and (arraylist-type? field-type)
-              (plain-copy-type? (p/code-nth field-type 1)))]
+            list-type (arraylist-type? field-type)
+            list-element (if list-type (p/code-nth field-type 1) '())
+            list-child (if list-type
+              (schema-for-type schemas (p/code-nth record 0) list-element) '())
+            list-field (and list-type
+              (or (plain-copy-type? list-element) (> (p/code-count list-child) 0)))]
         (if list-field
           (do
             (set! value-available false)
-            (p/code-list-push! clones
-              `(let [status (containers/clone-copy! [~(p/code-nth field-type 1)]
-                  (field (p/cast (ptr ~type) ~clone-old) ~name) (field (p/cast (ptr ~type) ~clone-raw) ~name) ~clone-journal)]
-                 (when (!= status 0) (break :done status))))
+            (if (plain-copy-type? list-element)
+              (do
+                (p/code-list-push! clones
+                  `(let [status (containers/clone-copy! [~list-element]
+                      (field (p/cast (ptr ~type) ~clone-old) ~name) (field (p/cast (ptr ~type) ~clone-raw) ~name) ~clone-journal)]
+                     (when (!= status 0) (break :done status))))
+                0)
+              (let [element-copy (p/fresh-identifier "state-element-copy")
+                    physical-element (p/code-nth list-child 4)
+                    old-list-id (p/fresh-identifier "old-list")
+                    next-list-id (p/fresh-identifier "next-list")
+                    status-id (p/fresh-identifier "element-status")
+                    element-index (p/fresh-identifier "element-index")]
+                (p/code-list-push! out
+                  `(defn* ~element-copy :jit/retain false :lpc/preparation true
+                    [(old ~physical-element)] (-> ~physical-element) old))
+                (p/code-list-push! clones
+                  `(let [~old-list-id (field (p/cast (ptr ~type) ~clone-old) ~name)
+                         ~next-list-id (field (p/cast (ptr ~type) ~clone-raw) ~name)
+                         ~status-id (containers/prepare! [~physical-element ~physical-element]
+                           ~old-list-id ~next-list-id ~clone-journal)]
+                     (when (!= ~status-id 0) (break :done ~status-id))
+                     (for [~element-index 0 (.len ~old-list-id)]
+                       (store! (p/index (.data ~next-list-id) ~element-index)
+                         (~element-copy (load (p/index (.data ~old-list-id) ~element-index))))))) 0))
             (p/code-list-push! aborts
-              `(when (> ~abort-prefix ~i) (containers/release! [~(p/code-nth field-type 1)]
+              `(when (> ~abort-prefix ~i) (containers/release! [~(if (> (p/code-count list-child) 0) (p/code-nth list-child 4) list-element)]
                 (field (p/cast (ptr ~type) ~abort-raw) ~name))))
             (p/code-list-push! retires
-              `(containers/release! [~(p/code-nth field-type 1)]
+              `(containers/release! [~(if (> (p/code-count list-child) 0) (p/code-nth list-child 4) list-element)]
                 (field (p/cast (ptr ~type) ~retire-raw) ~name))) 0)
           (do
             (p/code-list-push! clones
@@ -129,17 +155,62 @@
                 current-child (schema-for-type schemas (p/code-nth record 0) field-type)
                 prior-child (schema-for-type prior-schemas (p/code-nth record 0)
                   (p/code-nth old-field 1))
+                old-list-type (arraylist-type? (p/code-nth old-field 1))
+                old-list-element (if old-list-type (p/code-nth (p/code-nth old-field 1) 1) '())
+                prior-list-child (if old-list-type
+                  (schema-for-type prior-schemas (p/code-nth record 0) old-list-element) '())
+                slice-field (and (slice-type? field-type) (slice-type? (p/code-nth old-field 1)))
+                current-slice-child (if slice-field
+                  (schema-for-type schemas (p/code-nth record 0) (p/code-nth field-type 1)) '())
+                prior-slice-child (if slice-field
+                  (schema-for-type prior-schemas (p/code-nth record 0) (p/code-nth (p/code-nth old-field 1) 1)) '())
                 nested (and (> (p/code-count current-child) 0) (and (> (p/code-count prior-child) 0)
                   (and (p/code-eq (p/code-nth current-child 2) (p/code-nth prior-child 2))
                     (not (p/code-eq (p/code-nth current-child 3) (p/code-nth prior-child 3))))))
                 copy (p/fresh-identifier "state-field-copy")]
-            (if (and list-field (p/code-eq (p/code-nth old-field 1) field-type))
+            (if (and slice-field (and (> (p/code-count current-slice-child) 0)
+                  (> (p/code-count prior-slice-child) 0)))
               (do
+                (set! value-available false)
                 (p/code-list-push! migration
-                  `(let [status (containers/clone-copy! [~(p/code-nth field-type 1)]
-                      (field ~source ~source-name) (field ~target ~name) ~migration-journal)]
-                     (when (!= status 0) (break :done status))))
+                  `(store! (field ~target ~name)
+                    (slice/slice-new
+                      (p/cast (ptr ~(p/code-nth current-slice-child 4))
+                        (slice/slice-data ~(field-access source source-name)))
+                      (slice/slice-len ~(field-access source source-name)))))
                 0)
+            (if (and list-field old-list-type)
+              (if (and (plain-copy-type? list-element) (p/code-eq old-list-element list-element))
+                (do
+                  (p/code-list-push! migration
+                    `(let [status (containers/clone-copy! [~list-element]
+                        (field ~source ~source-name) (field ~target ~name) ~migration-journal)]
+                       (when (!= status 0) (break :done status))))
+                  0)
+                (if (and (> (p/code-count list-child) 0) (and (> (p/code-count prior-list-child) 0)
+                      (p/code-eq (p/code-nth list-child 2) (p/code-nth prior-list-child 2))))
+                  (let [element-copy (p/fresh-identifier "state-element-migrate")
+                        old-physical (p/code-nth prior-list-child 4)
+                        next-physical (p/code-nth list-child 4)
+                        old-list-id (p/fresh-identifier "old-list")
+                        next-list-id (p/fresh-identifier "next-list")
+                        status-id (p/fresh-identifier "element-status")
+                        element-index (p/fresh-identifier "element-index")
+                        element-old (p/fresh-identifier "element-old")]
+                    (p/code-list-push! out
+                      `(defn* ~element-copy :jit/retain false [(~element-old ~old-physical)] (-> ~next-physical)
+                        ~(if (p/code-eq (p/code-nth list-child 3) (p/code-nth prior-list-child 3))
+                          element-old `(~(p/code-nth list-child 10) ~element-old))))
+                    (p/code-list-push! migration
+                      `(let [~old-list-id (field ~source ~source-name)
+                             ~next-list-id (field ~target ~name)
+                             ~status-id (containers/prepare! [~old-physical ~next-physical]
+                               ~old-list-id ~next-list-id ~migration-journal)]
+                         (when (!= ~status-id 0) (break :done ~status-id))
+                         (for [~element-index 0 (.len ~old-list-id)]
+                           (store! (p/index (.data ~next-list-id) ~element-index)
+                             (~element-copy (load (p/index (.data ~old-list-id) ~element-index))))))) 0)
+                  (do (set! available false) 0)))
             (if (> (p/code-count transition) 0)
               (do
                 (p/code-list-push! out
@@ -174,7 +245,7 @@
                     `(store! (field ~target ~name) (~copy ~(field-access source source-name))))
                   (p/code-list-push! values (syntax/keyword name))
                   (p/code-list-push! values `(~copy ~(field-access old-value source-name))) 0)
-                (do (set! available false) 0))))))
+                (do (set! available false) 0)))))))
           (when (< (p/code-count field) 3) (set! available false) 0))
         (p/code-list-push! migration `(store! ~migration-prefix ~(+ i 1)))))
     (p/code-list-push! out

@@ -12,7 +12,7 @@ Native immutable views, typed function gates, semantic repair, desired/accepted 
 
 The archived 1,000-edit color run has median 44.907 ms, p99 52.775 ms and maximum 53.138 ms, with zero misses. That run predates the latest schema and input-domain changes; the visible latency gate must be rerun. The separate 1,000-schema-edit durability gate passes at 703 MB peak RSS, four native generations and flat live session allocation bytes.
 
-The moving Paper fixture has passed radius edits, an added defaulted field, bool-to-sum migration, blocked drawing and one-form repair. A separate visible test proved independent control progress while scene input remained ordered behind a blocked tick. All 74 native tests pass. The five socket suites and prior Emacs checks cover separate protocol/editor contracts; see the raw reports and `MOVING_PAPER.md` for their limits.
+The moving Paper fixture has passed radius edits, an added defaulted field, bool-to-sum migration, blocked drawing and one-form repair. A separate visible test proved independent control progress while scene input remained ordered behind a blocked tick. All 75 native tests pass. The five socket suites and prior Emacs checks cover separate protocol/editor contracts; see the raw reports and `MOVING_PAPER.md` for their limits.
 
 The complete design is still in progress: broader managed value/ownership policies, ABI lineage, file synchronization, streamed output, completion, exact fresh-render pixel comparison and remaining durability/latency workloads are outstanding.
 
