@@ -1,0 +1,63 @@
+(module live-poc-coil.migration-test)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.migration" :as migration)
+(import "live-poc-coil.relocation" :as relocation)
+
+(defstruct Before [(value i64)])
+(defstruct After [(value i64) (extra i64)])
+
+(impl migration/ValuePolicy Before
+  (clone-value [(old (ref Before)) (next (mut Before))
+                (journal (ptr relocation/Journal))] (-> i64)
+    (migration/clone! [i64] (field old value) (mut (field next value)) journal))
+  (rewrite-value [(value (mut Before))
+                  (journal (ptr relocation/Journal))] (-> i64) 0)
+  (abort-value [(value (mut Before))] (-> void))
+  (retire-value [(value (mut Before))] (-> void)))
+
+(impl migration/ValuePolicy After
+  (clone-value [(old (ref After)) (next (mut After))
+                (journal (ptr relocation/Journal))] (-> i64)
+    (block :done
+      (let [status (migration/clone! [i64]
+                     (field old value) (mut (field next value)) journal)]
+        (when (!= status 0) (break :done status)))
+      (migration/clone! [i64] (field old extra) (mut (field next extra)) journal)))
+  (rewrite-value [(value (mut After))
+                  (journal (ptr relocation/Journal))] (-> i64) 0)
+  (abort-value [(value (mut After))] (-> void))
+  (retire-value [(value (mut After))] (-> void)))
+
+(impl migration/Migration After
+  (migrate-value [(next (mut After)) (old (ref Before))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (let [status (migration/clone! [i64]
+                   (field old value) (mut (field next value)) journal)]
+      (if (!= status 0)
+        status
+        (do (store! (field next extra) 9) 0)))))
+
+(deftest generic-container-migration-composes-element-policy-and-rewrites-view
+  (let [allocator (a/malloc-allocator)
+        old (p/alloc-stack (al/ArrayList Before))
+        next (p/alloc-stack (al/ArrayList After))
+        view (p/alloc-stack (slice After))
+        journal (p/alloc-stack relocation/Journal)]
+    (relocation/init! journal allocator)
+    (store! old (al/al-new [Before] allocator))
+    (al/al-push! old (Before :value 41))
+    (al/al-push! old (Before :value 42))
+    (store! next (al/al-new [After] allocator))
+    (assert (= (migration/migrate-value (mut next) old journal) 0))
+    (store! view (slice/slice-new (p/cast (ptr After) (p/index (.data old) 1)) 1))
+    (assert (= (migration/rewrite! [(slice After)] view journal) 0))
+    (assert (= (.value (slice/slice-data (load view))) 42))
+    (assert (= (.extra (slice/slice-data (load view))) 9))
+    (store! (field (p/index (.data next) 1) value) 50)
+    (assert (= (.value (slice/slice-data (load view))) 50))
+    (migration/retire! [(al/ArrayList Before)] old)
+    (migration/retire! [(al/ArrayList After)] next)
+    (relocation/destroy! journal)))

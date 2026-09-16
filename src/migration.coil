@@ -1,0 +1,218 @@
+(module live-poc-coil.migration)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.relocation" :as relocation)
+
+;;; Runtime lifecycle for one concrete value shape. Implementations compose:
+;;; aggregate policies invoke the policy of each live child. Clone and migration
+;;; always construct independent ownership so a failed transaction can discard
+;;; its shadow without touching the accepted value.
+(deftrait ValuePolicy [Self]
+  (clone-value [(old (ref Self)) (next (mut Self))
+                (journal (ptr relocation/Journal))] (-> i64))
+  (rewrite-value [(value (mut Self))
+                  (journal (ptr relocation/Journal))] (-> i64))
+  (abort-value [(value (mut Self))] (-> void))
+  (retire-value [(value (mut Self))] (-> void)))
+
+;;; One directed schema edge. Old is an associated type selected by the concrete
+;;; destination policy. Generated physical record and sum versions implement this
+;;; automatically; generic owners such as ArrayList implement it once and recurse.
+(deftrait Migration [Self Old]
+  (migrate-value [(next (mut Self)) (old (ref Old))
+                  (journal (ptr relocation/Journal))] (-> i64)))
+
+;;; These generic entry points make the policy's Self type explicit before trait
+;;; dispatch. That matters for pointer-shaped values: the pointer passed as the
+;;; mutable place is storage for T, not itself the policy receiver `(ptr T)`.
+(defn clone! [(T ValuePolicy)] [(old (ref T)) (next (mut T))
+  (journal (ptr relocation/Journal))] (-> i64)
+  (clone-value old (mut next) journal))
+(defn rewrite! [(T ValuePolicy)] [(value (mut T))
+  (journal (ptr relocation/Journal))] (-> i64)
+  (rewrite-value (mut value) journal))
+(defn abort! [(T ValuePolicy)] [(value (mut T))] (-> void)
+  (abort-value (mut value)))
+(defn retire! [(T ValuePolicy)] [(value (mut T))] (-> void)
+  (retire-value (mut value)))
+(defn migrate! [Old (New (Migration Old))]
+  [(next (mut New)) (old (ref Old))
+   (journal (ptr relocation/Journal))] (-> i64)
+  (migrate-value (mut next) old journal))
+
+(defn leaf-policy [(T Code)] (-> Code)
+  `(do
+     (impl ValuePolicy ~T
+       (clone-value [(old (ref ~T)) (next (mut ~T))
+                     (journal (ptr relocation/Journal))] (-> i64)
+         (store! next (load old)) 0)
+       (rewrite-value [(value (mut ~T))
+                       (journal (ptr relocation/Journal))] (-> i64) 0)
+       (abort-value [(value (mut ~T))] (-> void))
+       (retire-value [(value (mut ~T))] (-> void)))
+     (impl Migration ~T
+       (migrate-value [(next (mut ~T)) (old (ref ~T))
+                       (journal (ptr relocation/Journal))] (-> i64)
+         (store! next (load old)) 0))))
+
+(leaf-policy bool)
+(leaf-policy i8)
+(leaf-policy i16)
+(leaf-policy i32)
+(leaf-policy i64)
+(leaf-policy u8)
+(leaf-policy u16)
+(leaf-policy u32)
+(leaf-policy u64)
+(leaf-policy f32)
+(leaf-policy f64)
+
+;;; Raw pointers and slices are borrowed values. Their pointees are migrated by
+;;; the owning allocation; rewrite only changes an address when the journal knows
+;;; the corresponding object or allocation range.
+(impl [T] ValuePolicy (ptr T)
+  (clone-value [(old (ref (ptr T))) (next (mut (ptr T)))
+                (journal (ptr relocation/Journal))] (-> i64)
+    (store! next (load old)) 0)
+  (rewrite-value [(value (mut (ptr T)))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (relocation/pointer-if-known! journal (p/llvm-ir (ptr (ptr i8)) [value] "ret $ret $0")))
+  (abort-value [(value (mut (ptr T)))] (-> void))
+  (retire-value [(value (mut (ptr T)))] (-> void)))
+
+(impl [T] Migration (ptr T)
+  (migrate-value [(next (mut (ptr T))) (old (ref (ptr T)))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (store! next (load old)) 0))
+
+(impl [T] ValuePolicy (slice T)
+  (clone-value [(old (ref (slice T))) (next (mut (slice T)))
+                (journal (ptr relocation/Journal))] (-> i64)
+    (store! next (load old)) 0)
+  (rewrite-value [(value (mut (slice T)))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (relocation/slice-if-known! journal
+      (p/llvm-ir (ptr (ptr i8)) [value] "ret $ret $0")
+      (slice/slice-len (load value))
+      (p/sizeof T)))
+  (abort-value [(value (mut (slice T)))] (-> void))
+  (retire-value [(value (mut (slice T)))] (-> void)))
+
+(impl [T] Migration (slice T)
+  (migrate-value [(next (mut (slice T))) (old (ref (slice T)))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (store! next (load old)) 0))
+
+(defn list-header-valid? [T] [(value (ref (al/ArrayList T)))] (-> bool)
+  (let [length (.len value) capacity (.cap value) data (.data value)]
+    (and (>= length 0)
+      (and (>= capacity length)
+        (if (= capacity 0)
+          (= (p/cast i64 data) 0)
+          (!= (p/cast i64 data) 0))))))
+
+(defn list-release-storage! [T] [(value (ptr (al/ArrayList T)))] (-> void)
+  (let [capacity (.cap value) allocator (.alc value)]
+    (when (> capacity 0)
+      (match (a/request [T] capacity)
+        (Some [request]
+          (a/raw-free allocator (p/cast (ptr i8) (.data value)) request))
+        (None [] (assert false))))
+    (store! value
+      (al/ArrayList :data (p/cast (ptr T) 0) :len 0 :cap 0 :alc allocator))))
+
+(defn list-abort-prefix! [(T ValuePolicy)]
+  [(value (ptr (al/ArrayList T)))] (-> void)
+  (let [length (.len value)]
+    (for [i 0 length]
+      (abort! [T] (p/index (.data value) i)))
+    (list-release-storage! [T] value)))
+
+(impl [(T ValuePolicy)] ValuePolicy (al/ArrayList T)
+  (clone-value [(old (ref (al/ArrayList T)))
+                (next (mut (al/ArrayList T)))
+                (journal (ptr relocation/Journal))] (-> i64)
+    (block :done
+      (unless (list-header-valid? old) (break :done -1))
+      (let [length (.len old) capacity (.cap old) allocator (.alc old)]
+        (store! next
+          (al/ArrayList :data (p/cast (ptr T) 0) :len 0 :cap 0 :alc allocator))
+        (when (= capacity 0) (break :done 0))
+        (match (a/request [T] capacity)
+          (None [] (break :done -1))
+          (Some [request]
+            (match (a/raw-alloc allocator request)
+              (None [] (break :done -4))
+              (Some [raw]
+                (do
+                  (store! next
+                    (al/ArrayList :data (p/cast (ptr T) raw)
+                      :len 0 :cap capacity :alc allocator))
+                  (when (!= (relocation/elements! journal
+                              (p/cast (ptr i8) (.data old)) capacity (p/sizeof T)
+                              raw capacity (p/sizeof T)) 0)
+                    (list-release-storage! [T] next)
+                    (break :done -1))
+                  (for [i 0 length]
+                    (let [status (clone! [T]
+                                   (p/index (.data old) i)
+                                   (p/index (.data next) i)
+                                   journal)]
+                      (when (!= status 0)
+                        (list-abort-prefix! [T] next)
+                        (break :done status))
+                      (set! (.len next) (+ i 1))))
+                  0))))))))
+  (rewrite-value [(value (mut (al/ArrayList T)))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (block :done
+      (for [i 0 (.len value)]
+        (let [status (rewrite! [T] (p/index (.data value) i) journal)]
+          (when (!= status 0) (break :done status))))
+      0))
+  (abort-value [(value (mut (al/ArrayList T)))] (-> void)
+    (list-abort-prefix! [T] value))
+  (retire-value [(value (mut (al/ArrayList T)))] (-> void)
+    (for [i 0 (.len value)]
+      (retire! [T] (p/index (.data value) i)))
+    (list-release-storage! [T] value)))
+
+(impl [Old (New (Migration Old) ValuePolicy)] Migration (al/ArrayList New)
+  (migrate-value [(next (mut (al/ArrayList New)))
+                  (old (ref (al/ArrayList Old)))
+                  (journal (ptr relocation/Journal))] (-> i64)
+    (block :done
+      (unless (list-header-valid? old) (break :done -1))
+      (let [length (.len old) capacity (.cap old) allocator (.alc old)]
+        (store! next
+          (al/ArrayList :data (p/cast (ptr New) 0) :len 0 :cap 0 :alc allocator))
+        (when (= capacity 0) (break :done 0))
+        (match (a/request [New] capacity)
+          (None [] (break :done -1))
+          (Some [request]
+            (match (a/raw-alloc allocator request)
+              (None [] (break :done -4))
+              (Some [raw]
+                (do
+                  (store! next
+                    (al/ArrayList :data (p/cast (ptr New) raw)
+                      :len 0 :cap capacity :alc allocator))
+                  (when (!= (relocation/elements! journal
+                              (p/cast (ptr i8) (.data old)) capacity (p/sizeof Old)
+                              raw capacity (p/sizeof New)) 0)
+                    (list-release-storage! [New] next)
+                    (break :done -1))
+                  (for [i 0 length]
+                    (let [status (migrate-value
+                                   (mut (p/index (.data next) i))
+                                   (p/index (.data old) i)
+                                   journal)]
+                      (when (!= status 0)
+                        (list-abort-prefix! [New] next)
+                        (break :done status))
+                      (set! (.len next) (+ i 1))))
+                  0)))))))))
+
+(export ValuePolicy Migration clone! rewrite! abort! retire! migrate-value)

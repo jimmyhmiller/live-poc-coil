@@ -30,6 +30,39 @@
         (when (and (= (.old entry) (load slot)) (= (.logical entry) logical))
           (store! slot (.next entry)) (break :done 0))))
     -1))
+
+;;; Rewrite a borrowed raw pointer when it names a migrated object or lies within
+;;; one migrated allocation. Unknown pointers are external/static borrows and stay
+;;; unchanged. More than one match is rejected rather than guessed.
+(defn pointer-if-known! [(journal (ptr Journal)) (slot (ptr (ptr i8)))] (-> i64)
+  (block :done
+    (when (= (p/cast i64 (load slot)) 0) (break :done 0))
+    (let [address (p/cast u64 (load slot)) (mut found) 0
+          (mut target) (p/cast (ptr i8) 0)]
+      (for [i 0 (al/al-len (.objects journal))]
+        (let [entry (al/al-get (.objects journal) i)]
+          (when (= (.old entry) (load slot))
+            (set! found (+ (load found) 1))
+            (set! target (.next entry)))))
+      (for [i 0 (al/al-len (.ranges journal))]
+        (let [entry (al/al-get (.ranges journal) i)
+              base (p/cast u64 (.old entry))]
+          (when (and (>= address base)
+                  (< (- address base) (p/cast u64 (.old-bytes entry))))
+            (let [offset (p/cast i64 (- address base))]
+              (if (= (.old-stride entry) 0)
+                (when (< offset (.next-bytes entry))
+                  (set! found (+ (load found) 1))
+                  (set! target (p/index (.next entry) offset)))
+                (when (= (% offset (.old-stride entry)) 0)
+                  (let [index (/ offset (.old-stride entry))]
+                    (when (< (* index (.next-stride entry)) (.next-bytes entry))
+                      (set! found (+ (load found) 1))
+                      (set! target
+                        (p/index (.next entry) (* index (.next-stride entry))))))))))))
+      (when (> (load found) 1) (break :done -1))
+      (when (= (load found) 1) (store! slot (load target)) 0)
+      0)))
 (defn range! [(journal (ptr Journal)) (old (ptr i8)) (old-bytes i64)
              (next (ptr i8)) (next-bytes i64)] (-> i64)
   (block :done
