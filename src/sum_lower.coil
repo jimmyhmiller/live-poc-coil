@@ -2,6 +2,7 @@
 (import "coil.primitive" :as p)
 (import "live-poc-coil.policy-state" :as policy)
 (import "live-poc-coil.syntax-rewrite" :as syntax)
+(import "live-poc-coil.migration" :as migration)
 
 ;;; Record: (module authored-name physical-name version source variant-map).
 ;;; Variant rows are (authored-name physical-name).
@@ -90,6 +91,11 @@
           (p/code-list-push! next (syntax/rewrite (p/code-nth variant j) map '())))
         (p/code-list-push! out (syntax/rebuild variant (p/code-list-done next)))))
     (syntax/rebuild form (p/code-list-done out))))
+(defn policy-target [(record Code)] (-> Code)
+  (let [source (p/code-nth record 4) physical (p/code-nth record 2)]
+    (if (p/code-vector? (p/code-nth source 2))
+      `(~physical ~@(p/code-nth source 2))
+      physical)))
 (defn definition? [(form Code)] (-> bool)
   (and (p/code-list? form) (and (> (p/code-count form) 1)
     (or (p/code-eq (p/code-nth form 0) `defn) (p/code-eq (p/code-nth form 0) `defn*)))))
@@ -112,7 +118,8 @@
           (if (sum? form)
             (let [record (p/code-nth (policy/sums (load state))
                     (lookup (policy/sums (load state)) module-name (p/code-nth form 1)))]
-              (p/code-list-push! out (physical form record map)))
+              (p/code-list-push! out (physical form record map))
+              (p/code-list-push! out `(derive migration/ValuePolicy ~(policy-target record))))
             (p/code-list-push! out (syntax/rewrite form map '())))))
       (when (load changed)
         (for [i 0 (p/code-count (policy/authored accepted))]

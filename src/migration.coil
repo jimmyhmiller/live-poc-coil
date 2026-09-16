@@ -215,4 +215,152 @@
                       (set! (.len next) (+ i 1))))
                   0)))))))))
 
+;;; Aggregate lifecycle is derived from the compiler's type registry.  The
+;;; generated implementation contains no knowledge of particular field types:
+;;; every child is handled through ValuePolicy, so user records, generic
+;;; containers, and records nested inside either compose by ordinary trait
+;;; selection.
+(defn policy-bounds [(T Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (when (p/code-list? T)
+      (for [i 1 (p/code-count T)]
+        (p/code-list-push! out `(~(p/code-nth T i) ValuePolicy))))
+    (p/code-list-done out)))
+
+(defn struct-policy [(T Code)] (-> Code)
+  (let [old (p/fresh-identifier "policy-old") next (p/fresh-identifier "policy-next")
+        value (p/fresh-identifier "policy-value") journal (p/fresh-identifier "policy-journal")
+        prefix (p/fresh-identifier "policy-prefix") clones (p/code-list-new)
+        cleanup (p/code-list-new) rewrites (p/code-list-new)
+        aborts (p/code-list-new) retires (p/code-list-new)
+        count (p/code-field-count T)]
+    (for [i 0 count]
+      (let [name (p/code-field-name T i) type (p/code-field-type T i)
+            status (p/fresh-identifier "policy-status")]
+        (p/code-list-push! clones
+          `(let [~status (clone! [~type] (field ~old ~name) (mut (field ~next ~name)) ~journal)]
+             (if (!= ~status 0) (break :failed ~status) 0)
+             (store! ~prefix ~(+ i 1))))
+        (p/code-list-push! cleanup
+          `(if (> (load ~prefix) ~i)
+             (do (abort! [~type] (mut (field ~next ~name))) 0)
+             0))
+        (p/code-list-push! rewrites
+          `(let [~status (rewrite! [~type] (mut (field ~value ~name)) ~journal)]
+             (if (!= ~status 0) (break :done ~status) 0)))
+        (p/code-list-push! aborts `(abort! [~type] (mut (field ~value ~name))))
+        (p/code-list-push! retires `(retire! [~type] (mut (field ~value ~name))))))
+    (let [body
+      `(impl ~@(if (p/code-list? T) `([~@(policy-bounds T)]) '()) ValuePolicy ~T
+         (clone-value [(~old (ref ~T)) (~next (mut ~T))
+                       (~journal (ptr relocation/Journal))] (-> i64)
+           (store! ~next (p/zeroed ~T))
+           (let [(mut ~prefix) 0
+                 result (block :failed ~@(p/code-list-done clones) 0)]
+             (when (!= result 0) ~@(p/code-list-done cleanup))
+             result))
+         (rewrite-value [(~value (mut ~T))
+                         (~journal (ptr relocation/Journal))] (-> i64)
+           (block :done ~@(p/code-list-done rewrites) 0))
+         (abort-value [(~value (mut ~T))] (-> void)
+           (do ~@(p/code-list-done aborts)))
+         (retire-value [(~value (mut ~T))] (-> void)
+           (do ~@(p/code-list-done retires))))]
+      body)))
+
+(defn sum-policy-binds [(T Code) (vi i64) (count i64)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [i 0 count]
+      (p/code-list-push! out
+        (p/fresh-identifier (p/code-variant-field-name T vi i))))
+    (p/code-list-done out)))
+
+(defn policy-type-param? [(T Code) (type Code)] (-> bool)
+  (block :found
+    (when (p/code-list? T)
+      (for [i 1 (p/code-count T)]
+        (when (p/code-eq (p/code-nth T i) type) (break :found true))))
+    false))
+
+(defn sum-policy-value [(T Code) (type Code) (binder Code)] (-> Code)
+  (let [shape (p/code-type-shape type)]
+    (if (or (policy-type-param? T type)
+            (or (p/code-eq shape `struct) (p/code-eq shape `sum)))
+      `(load ~binder)
+      binder)))
+
+(defn sum-policy-constructor [(T Code) (vi i64) (values Code)] (-> Code)
+  (if (p/code-list? T)
+    `(~(p/code-variant-qname T vi)
+      [~@(let [out (p/code-list-new)]
+            (for [i 1 (p/code-count T)] (p/code-list-push! out (p/code-nth T i)))
+            (p/code-list-done out))]
+      ~@values)
+    `(~(p/code-variant-qname T vi) ~@values)))
+
+(defn sum-policy-arm [(T Code) (vi i64) (operation i64)
+  (place Code) (journal Code)] (-> Code)
+  (let [count (p/code-variant-fields T vi) binds (sum-policy-binds T vi count)
+        locals (p/code-list-new) values (p/code-list-new) steps (p/code-list-new)
+        cleanup (p/code-list-new) prefix (p/fresh-identifier "sum-prefix")]
+    (for [i 0 count]
+      (let [type (p/code-variant-field-type T vi i)
+            local (p/fresh-identifier "sum-field") status (p/fresh-identifier "sum-status")]
+        (p/code-list-push! locals `(mut ~local))
+        (p/code-list-push! locals
+          (if (= operation 0) `(p/zeroed ~type)
+            (sum-policy-value T type (p/code-nth binds i))))
+        (p/code-list-push! values `(load (mut ~local)))
+        (cond (= operation 0)
+          (do
+            (p/code-list-push! steps
+              `(let [~status (clone! [~type] ~(p/code-nth binds i) (mut ~local) ~journal)]
+                 (if (!= ~status 0) (break :sum-done ~status) 0)
+                 (store! ~prefix ~(+ i 1))))
+            (p/code-list-push! cleanup
+              `(if (> (load ~prefix) ~i) (do (abort! [~type] (mut ~local)) 0) 0)) 0)
+          (= operation 1)
+          (do (p/code-list-push! steps
+                `(let [~status (rewrite! [~type] (mut ~local) ~journal)]
+                   (if (!= ~status 0) (break :sum-done ~status) 0))) 0)
+          (= operation 2) (do (p/code-list-push! steps `(abort! [~type] (mut ~local))) 0)
+          :else (do (p/code-list-push! steps `(retire! [~type] (mut ~local))) 0))))
+    `(~(p/code-variant-qname T vi) [~@binds]
+      (let [~@(p/code-list-done locals) (mut ~prefix) 0]
+        ~(cond (= operation 0)
+          `(let [result (block :sum-done ~@(p/code-list-done steps) 0)]
+             (if (!= result 0)
+               (do ~@(p/code-list-done cleanup) result)
+               (do (store! ~place ~(sum-policy-constructor T vi (p/code-list-done values))) 0)))
+          (= operation 1)
+          `(let [result (block :sum-done ~@(p/code-list-done steps) 0)]
+             (if (!= result 0) result
+               (do (store! ~place ~(sum-policy-constructor T vi (p/code-list-done values))) 0)))
+          :else `(do ~@(p/code-list-done steps)))))))
+
+(defn sum-policy-arms [(T Code) (operation i64) (place Code) (journal Code)] (-> Code)
+  (let [out (p/code-list-new)]
+    (for [vi 0 (p/code-variant-count T)]
+      (p/code-list-push! out (sum-policy-arm T vi operation place journal)))
+    (p/code-list-done out)))
+
+(defn sum-policy [(T Code)] (-> Code)
+  (let [old (p/fresh-identifier "sum-old") next (p/fresh-identifier "sum-next")
+        value (p/fresh-identifier "sum-value") journal (p/fresh-identifier "sum-journal")]
+    `(impl ~@(if (p/code-list? T) `([~@(policy-bounds T)]) '()) ValuePolicy ~T
+      (clone-value [(~old (ref ~T)) (~next (mut ~T))
+                    (~journal (ptr relocation/Journal))] (-> i64)
+        (match (load ~old) ~@(sum-policy-arms T 0 next journal)))
+      (rewrite-value [(~value (mut ~T))
+                      (~journal (ptr relocation/Journal))] (-> i64)
+        (match (load ~value) ~@(sum-policy-arms T 1 value journal)))
+      (abort-value [(~value (mut ~T))] (-> void)
+        (match (load ~value) ~@(sum-policy-arms T 2 value journal)))
+      (retire-value [(~value (mut ~T))] (-> void)
+        (match (load ~value) ~@(sum-policy-arms T 3 value journal))))))
+
+(defderive ValuePolicy
+  (struct [T] (struct-policy T))
+  (sum [T] (sum-policy T)))
+
 (export ValuePolicy Migration clone! rewrite! abort! retire! migrate-value)

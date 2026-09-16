@@ -7,6 +7,12 @@
 (import "live-poc-coil.syntax-state" :as envelope)
 (import "live-poc-coil.syntax-rewrite" :as syntax)
 (import "live-poc-coil.managed-api" :as api)
+(import "live-poc-coil.migration" :as migration)
+
+(defn policy-derive? [(form Code)] (-> bool)
+  (and (syntax/head? form `derive)
+    (and (> (p/code-count form) 2)
+      (p/code-eq (p/code-nth form 1) `migration/ValuePolicy))))
 
 (defn by-logical [(schemas Code) (logical Code)] (-> Code)
   (block :found
@@ -70,6 +76,12 @@
         (when (records/root? form)
           (p/code-list-push! roots `~(records/propose-root! state name form)) 0)))
     (p/code-list-push! out name)
+    ; Sum definitions and their structural policy impls must be registered before
+    ; a generated record policy selects ValuePolicy for a sum-valued field.
+    (for [i 1 (p/code-count module)]
+      (let [form (p/code-nth module i)]
+        (when (or (syntax/head? form `defsum) (policy-derive? form))
+          (p/code-list-push! out form) 0)))
     ; Physical schemas must precede macro consumers such as derive so Coil's
     ; generated-declaration registry exposes their compile-time reflection.
     (let [candidate (load state) changes (load changed)
@@ -84,6 +96,8 @@
             (for [j 0 (p/code-count generated)] (p/code-list-push! out (p/code-nth generated j)))))))
     (for [i 1 (p/code-count module)]
       (let [form (p/code-nth module i)]
+        (if (or (syntax/head? form `defsum) (policy-derive? form))
+          0
         (if (records/physical? (load state) name form)
           (do (p/code-list-push! out form) 0)
           (unless (or (records/reset? form) (or (transitions/declaration? form) (or (records/schema? form) (records/root? form))))
@@ -92,7 +106,7 @@
             (p/code-list-push! out
               (if (or (syntax/head? form `defn) (or (syntax/head? form `defn*)
                       (or (syntax/head? form `def) (syntax/head? form `const))))
-                form (source-rewrite (load state) name form))) 0))))
+                form (source-rewrite (load state) name form))) 0)))))
     (let [changes (load changed)]
       ; Until state dependencies are precise, recheck the module's complete live
       ; function set. This never rewrites an accepted machine-code body in place.

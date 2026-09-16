@@ -7,6 +7,7 @@
 (import "live-poc-coil.syntax-rewrite" :as syntax)
 (import "live-poc-coil.transitions" :as transitions)
 (import "live-poc-coil.container-policy" :as containers)
+(import "live-poc-coil.migration" :as migration)
 (import "coil.slice" :as slice)
 (import "coil.jit.lifetime")
 
@@ -83,6 +84,7 @@
       (if resource
         `(defn* ~proof :jit/retain false [(value ~type)] (-> ~type) value)
         `(defn* ~proof :jit/retain false :lpc/preparation true [(value ~type)] (-> ~type) value)))
+    (p/code-list-push! out `(derive migration/ValuePolicy ~type))
     (for [i 0 count]
       (let [field (p/code-nth fields i) name (p/code-nth field 0) field-type (p/code-nth field 1)
             transition (if (> (p/code-count prior) 0) (transitions/for-edge record prior name) '())
