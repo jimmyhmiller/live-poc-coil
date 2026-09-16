@@ -1,0 +1,47 @@
+(module live-poc-coil.container-policy)
+(import "coil.primitive" :as p)
+(import "coil.alloc" :as a)
+(import "coil.arraylist" :as al)
+(import "coil.slice" :as slice)
+(import "live-poc-coil.relocation" :as relocation)
+
+;;; Transactional policy for ArrayList's owned buffer. The list's allocator is
+;;; part of its value, so a shadow allocation uses the same ownership domain.
+;;; Registration happens before any borrowed slice is rewritten.
+(defn clone-copy! [(T Copy)] [(old (ptr (al/ArrayList T)))
+  (next (ptr (al/ArrayList T))) (journal (ptr relocation/Journal))] (-> i64)
+  (block :done
+    (let [length (.len old) capacity (.cap old) data (.data old) allocator (.alc old)]
+      (when (or (< length 0) (or (< capacity length)
+        (if (= capacity 0) (!= (p/cast i64 data) 0) (= (p/cast i64 data) 0))))
+        (break :done -1))
+      (store! next (al/ArrayList :data (p/cast (ptr T) 0) :len 0 :cap 0 :alc allocator))
+      (when (= capacity 0) (break :done 0))
+      (when (> capacity (/ 9223372036854775807 (p/sizeof T))) (break :done -1))
+      (let [bytes (* capacity (p/sizeof T))
+            request (a/AllocRequest :type-id 0 :count capacity :bytes bytes :align (p/alignof T))]
+        (match (a/raw-alloc allocator request)
+          (None [] (break :done -4))
+          (Some [raw]
+            (let [destination (p/cast (ptr T) raw)]
+              (for [i 0 length] (store! (p/index destination i) (load (p/index data i))))
+              (store! next (al/ArrayList :data destination :len length :cap capacity :alc allocator))
+              (when (!= (relocation/range! journal (p/cast (ptr i8) data) bytes raw bytes) 0)
+                (a/raw-free allocator raw request)
+                (store! next (al/ArrayList :data (p/cast (ptr T) 0) :len 0 :cap 0 :alc allocator))
+                (break :done -1))
+              0)))))))
+
+(defn release! [T] [(list (ptr (al/ArrayList T)))] (-> void)
+  (let [capacity (.cap list) data (.data list)]
+    (when (> capacity 0)
+      (assert (<= capacity (/ 9223372036854775807 (p/sizeof T))))
+      (let [bytes (* capacity (p/sizeof T))]
+        (a/raw-free (.alc list) (p/cast (ptr i8) data)
+          (a/AllocRequest :type-id 0 :count capacity :bytes bytes :align (p/alignof T)))))
+    (store! list (al/ArrayList :data (p/cast (ptr T) 0) :len 0 :cap 0 :alc (.alc list)))))
+
+(defn rewrite-slice! [T] [(value (ptr (slice T)))
+  (journal (ptr relocation/Journal))] (-> i64)
+  (relocation/slice-if-known! journal (p/cast (ptr (ptr i8)) value)
+    (slice/slice-len (load value)) (p/sizeof T)))

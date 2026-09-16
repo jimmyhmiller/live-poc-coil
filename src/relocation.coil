@@ -65,5 +65,31 @@
                     (set! target (p/index (.next entry) offset)))))))))
       (when (!= (load found) 1) (break :done -1))
       (store! slot (load target)) 0)))
+;;; Borrowed views may refer either into a migrated owned range or into stable
+;;; external/static storage. Rewrite the former and preserve the latter. An
+;;; ambiguous overlap remains an error because choosing either target would
+;;; silently corrupt an alias.
+(defn slice-if-known! [(journal (ptr Journal)) (slot (ptr (ptr i8)))
+  (count i64) (element-size i64)] (-> i64)
+  (block :done
+    (when (or (< count 0) (<= element-size 0)) (break :done -1))
+    (when (> count (/ 9223372036854775807 element-size)) (break :done -1))
+    (when (= (p/cast i64 (load slot)) 0) (break :done (if (= count 0) 0 -1)))
+    (let [address (p/cast u64 (load slot)) bytes (* count element-size)
+          (mut found) 0 (mut target) (p/cast (ptr i8) 0)]
+      (for [i 0 (al/al-len (.ranges journal))]
+        (let [entry (al/al-get (.ranges journal) i) base (p/cast u64 (.old entry))]
+          (when (>= address base)
+            (let [distance (- address base)]
+              (when (and (<= distance (p/cast u64 (.old-bytes entry)))
+                         (<= distance (p/cast u64 (.next-bytes entry))))
+                (let [offset (p/cast i64 distance)]
+                  (when (and (<= bytes (- (.old-bytes entry) offset))
+                             (<= bytes (- (.next-bytes entry) offset)))
+                    (set! found (+ (load found) 1))
+                    (set! target (p/index (.next entry) offset)))))))))
+      (when (> (load found) 1) (break :done -1))
+      (when (= (load found) 1) (store! slot (load target)) 0)
+      0)))
 (defn destroy! [(journal (ptr Journal))] (-> i64)
   (al/al-free! (field journal objects)) (al/al-free! (field journal ranges)) 0)
