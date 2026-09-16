@@ -82,10 +82,10 @@
   (abort-value [(value (mut (ptr T)))] (-> void))
   (retire-value [(value (mut (ptr T)))] (-> void)))
 
-(impl [T] Migration (ptr T)
-  (migrate-value [(next (mut (ptr T))) (old (ref (ptr T)))
+(impl [Old New] Migration (ptr New)
+  (migrate-value [(next (mut (ptr New))) (old (ref (ptr Old)))
                   (journal (ptr relocation/Journal))] (-> i64)
-    (store! next (load old)) 0))
+    (store! next (p/cast (ptr New) (load old))) 0))
 
 (impl [T] ValuePolicy (slice T)
   (clone-value [(old (ref (slice T))) (next (mut (slice T)))
@@ -100,10 +100,12 @@
   (abort-value [(value (mut (slice T)))] (-> void))
   (retire-value [(value (mut (slice T)))] (-> void)))
 
-(impl [T] Migration (slice T)
-  (migrate-value [(next (mut (slice T))) (old (ref (slice T)))
+(impl [Old New] Migration (slice New)
+  (migrate-value [(next (mut (slice New))) (old (ref (slice Old)))
                   (journal (ptr relocation/Journal))] (-> i64)
-    (store! next (load old)) 0))
+    (store! next
+      (slice/slice-new (p/cast (ptr New) (slice/slice-data (load old)))
+        (slice/slice-len (load old)))) 0))
 
 (defn list-header-valid? [T] [(value (ref (al/ArrayList T)))] (-> bool)
   (let [length (.len value) capacity (.cap value) data (.data value)]
@@ -348,14 +350,14 @@
   (let [old (p/fresh-identifier "sum-old") next (p/fresh-identifier "sum-next")
         value (p/fresh-identifier "sum-value") journal (p/fresh-identifier "sum-journal")]
     `(impl ~@(if (p/code-list? T) `([~@(policy-bounds T)]) '()) ValuePolicy ~T
-      (clone-value [(~old (ref ~T)) (~next (mut ~T))
-                    (~journal (ptr relocation/Journal))] (-> i64)
-        (match (load ~old) ~@(sum-policy-arms T 0 next journal)))
-      (rewrite-value [(~value (mut ~T))
+        (clone-value [(~old (ref ~T)) (~next (mut ~T))
                       (~journal (ptr relocation/Journal))] (-> i64)
-        (match (load ~value) ~@(sum-policy-arms T 1 value journal)))
-      (abort-value [(~value (mut ~T))] (-> void)
-        (match (load ~value) ~@(sum-policy-arms T 2 value journal)))
+          (match (load ~old) ~@(sum-policy-arms T 0 next journal)))
+        (rewrite-value [(~value (mut ~T))
+                        (~journal (ptr relocation/Journal))] (-> i64)
+          (match (load ~value) ~@(sum-policy-arms T 1 value journal)))
+        (abort-value [(~value (mut ~T))] (-> void)
+          (match (load ~value) ~@(sum-policy-arms T 2 value journal)))
       (retire-value [(~value (mut ~T))] (-> void)
         (match (load ~value) ~@(sum-policy-arms T 3 value journal))))))
 
@@ -363,4 +365,4 @@
   (struct [T] (struct-policy T))
   (sum [T] (sum-policy T)))
 
-(export ValuePolicy Migration clone! rewrite! abort! retire! migrate-value)
+(export ValuePolicy Migration clone! rewrite! abort! retire! migrate! migrate-value)

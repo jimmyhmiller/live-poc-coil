@@ -79,7 +79,13 @@
         (mut available) true target (p/fresh-identifier "target") source (p/fresh-identifier "source")
         migration-prefix (p/fresh-identifier "migration-prefix")
         value-migrate (p/code-nth record 10) old-value (p/fresh-identifier "old-value")
-        resource (resource-fields? fields) (mut value-available) true]
+        resource (resource-fields? fields) (mut value-available) true
+        structural (p/code-list-new) structural-cleanup (p/code-list-new)
+        structural-prefix (p/fresh-identifier "structural-prefix")
+        structural-next (p/fresh-identifier "structural-next")
+        structural-old (p/fresh-identifier "structural-old")
+        structural-journal (p/fresh-identifier "structural-journal")
+        (mut structural-available) true]
     (p/code-list-push! out
       (if resource
         `(defn* ~proof :jit/retain false [(value ~type)] (-> ~type) value)
@@ -250,6 +256,96 @@
                 (do (set! available false) 0)))))))
           (when (< (p/code-count field) 3) (set! available false) 0))
         (p/code-list-push! migration `(store! ~migration-prefix ~(+ i 1)))))
+    ; Directed record migration is fieldwise.  Each unchanged field delegates to
+    ; Migration for its exact old/new types, so nested records and generic owners
+    ; recurse without this adapter knowing their shapes.  Explicit transitions
+    ; and defaults remain the two semantic operations that cannot be inferred.
+    (when (> (p/code-count prior) 0)
+      (for [i 0 count]
+        (let [field (p/code-nth fields i) name (p/code-nth field 0)
+              field-type (p/code-nth field 1)
+              transition (transitions/for-edge record prior name)
+              source-name (if (> (p/code-count transition) 8) (p/code-nth transition 8) name)
+              old-index (field-index (p/code-nth prior 5) source-name)]
+          (if (>= old-index 0)
+            (let [old-field (p/code-nth (p/code-nth prior 5) old-index)
+                  old-type (p/code-nth old-field 1)
+                  current-child (schema-for-type schemas (p/code-nth record 0) field-type)
+                  prior-child (schema-for-type prior-schemas (p/code-nth record 0) old-type)
+                  nested-evolved (and (> (p/code-count current-child) 0)
+                    (and (> (p/code-count prior-child) 0)
+                      (not (p/code-eq (p/code-nth current-child 3) (p/code-nth prior-child 3)))))
+                  list-now (arraylist-type? field-type) list-old (arraylist-type? old-type)
+                  list-current-child (if list-now
+                    (schema-for-type schemas (p/code-nth record 0) (p/code-nth field-type 1)) '())
+                  list-prior-child (if list-old
+                    (schema-for-type prior-schemas (p/code-nth record 0) (p/code-nth old-type 1)) '())
+                  list-evolved (and list-now (and list-old
+                    (and (> (p/code-count list-current-child) 0)
+                      (and (> (p/code-count list-prior-child) 0)
+                        (not (p/code-eq (p/code-nth list-current-child 3)
+                          (p/code-nth list-prior-child 3)))))))
+                  slice-now (slice-type? field-type) slice-old (slice-type? old-type)
+                  slice-current-child (if slice-now
+                    (schema-for-type schemas (p/code-nth record 0) (p/code-nth field-type 1)) '())
+                  slice-prior-child (if slice-old
+                    (schema-for-type prior-schemas (p/code-nth record 0) (p/code-nth old-type 1)) '())
+                  slice-evolved (and slice-now (and slice-old
+                    (and (> (p/code-count slice-current-child) 0)
+                      (and (> (p/code-count slice-prior-child) 0)
+                        (not (p/code-eq (p/code-nth slice-current-child 3)
+                          (p/code-nth slice-prior-child 3)))))))
+                  directed-old (cond nested-evolved (p/code-nth prior-child 4)
+                    list-evolved `(al/ArrayList ~(p/code-nth list-prior-child 4))
+                    slice-evolved `(slice ~(p/code-nth slice-prior-child 4))
+                    :else old-type)
+                  directed-new (cond nested-evolved (p/code-nth current-child 4)
+                    list-evolved `(al/ArrayList ~(p/code-nth list-current-child 4))
+                    slice-evolved `(slice ~(p/code-nth slice-current-child 4))
+                    :else field-type)
+                  status (p/fresh-identifier "structural-status")]
+              (if (> (p/code-count transition) 0)
+                (let [copy (p/fresh-identifier "structural-transition")]
+                  (p/code-list-push! out
+                    `(defn* ~copy :jit/retain false :lpc/preparation true
+                      [(~(p/code-nth transition 5) ~(p/code-nth old-field 1))]
+                      (-> ~field-type) ~(p/code-nth transition 6)))
+                  (p/code-list-push! structural
+                    `(store! (field ~structural-next ~name)
+                      (~copy ~(field-access structural-old source-name)))) 0)
+                (cond (or nested-evolved (or list-evolved slice-evolved))
+                    (do (p/code-list-push! structural
+                          `(let [~status (migration/migrate! [~directed-old ~directed-new]
+                                           (mut (field ~structural-next ~name))
+                                           (field ~structural-old ~source-name) ~structural-journal)]
+                             (if (!= ~status 0) (break :migration-done ~status) 0))) 0)
+                  (p/code-eq old-type field-type)
+                    (do (p/code-list-push! structural
+                          `(let [~status (migration/clone! [~field-type]
+                                           (field ~structural-old ~source-name)
+                                           (mut (field ~structural-next ~name)) ~structural-journal)]
+                             (if (!= ~status 0) (break :migration-done ~status) 0))) 0)
+                  :else (do (set! structural-available false) 0))) 0)
+            (if (>= (p/code-count field) 3)
+              (do (p/code-list-push! structural
+                    `(store! (field ~structural-next ~name) (~(p/code-nth field 3)))) 0)
+              (do (set! structural-available false) 0)))
+          (p/code-list-push! structural `(store! ~structural-prefix ~(+ i 1)))
+          (p/code-list-push! structural-cleanup
+            `(if (> (load ~structural-prefix) ~i)
+               (do (migration/abort! [~field-type]
+                     (mut (field ~structural-next ~name))) 0) 0)))) 0)
+    (when (and (> (p/code-count prior) 0) (load structural-available))
+      (p/code-list-push! out
+        `(impl migration/Migration ~type
+          (migrate-value [(~structural-next (mut ~type))
+                          (~structural-old (ref ~(p/code-nth prior 4)))
+                          (~structural-journal (ptr relocation/Journal))] (-> i64)
+            (store! ~structural-next (p/zeroed ~type))
+            (let [(mut ~structural-prefix) 0
+                  status (block :migration-done ~@(p/code-list-done structural) 0)]
+              (when (!= status 0) ~@(p/code-list-done structural-cleanup))
+              status)))) 0)
     (p/code-list-push! out
       `(defn* ~initialize :jit/retain false [(raw (ptr i8)) (prefix (ptr i64))] (-> i64)
         (let [~target (p/cast (ptr ~type) raw)]
